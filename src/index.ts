@@ -8,7 +8,8 @@ import { createDecisionLog, flattenAnswers, readRecentEntries } from "./lib/log.
 import { formatModel } from "./lib/models.js";
 import { createOperations } from "./lib/operations.js";
 import { createPlanStore, renderActivePlan, type PlanStore } from "./lib/plans.js";
-import { BoundedMap, createSessionLookup } from "./lib/sessions.js";
+import { createRequestTracker, inOrder } from "./lib/requests.js";
+import { createSessionLookup } from "./lib/sessions.js";
 import { createSessionState } from "./lib/state.js";
 import { withTrace } from "./lib/trace.js";
 import { watchConfig } from "./lib/watch.js";
@@ -339,18 +340,19 @@ export default {
     // cancelled here: its check is killed and nothing more is sent into the session.
     const events = new AbortController();
     cleanups.push(() => events.abort());
-    // Storage work started from an event runs in the background, one task at a time per session, so the
-    // newest request always ends up stored and a deletion is not undone by an earlier write finishing late.
-    const background = new Map<string, Promise<void>>();
-    const inOrder = (sessionID: string, task: () => Promise<void>) => {
-      const next = (background.get(sessionID) ?? Promise.resolve()).then(task).catch((error: unknown) => report("session state", error));
-      background.set(sessionID, next);
-      void next.then(() => {
-        if (background.get(sessionID) === next) background.delete(sessionID);
-      });
-    };
-    // Requests the session has accepted but not started on yet, by inbox ID.
-    const pendingRequests = new BoundedMap<string, string>();
+    const reportState = (error: unknown) => report("session state", error);
+    const requests = createRequestTracker({
+      userText: async (sessionID, inboxID) => {
+        const message = (await ctx.session.context({ sessionID })).find((item) => item.id === inboxID);
+        return message?.type === "user" ? message.text : undefined;
+      },
+      supersede: (sessionID) => {
+        operations.cancel(sessionID);
+        loopHistories.delete(sessionID);
+      },
+      persist: (sessionID, request) => state.update(sessionID, { request }),
+      report: reportState,
+    });
     void (async () => {
       const types = ["session.execution.interrupted", "session.inbox.enqueued", "session.inbox.delivered", "session.inbox.cancelled", "session.deleted"] as const;
       // Nothing in this loop is awaited: a slow storage write for one session must never hold up the
@@ -362,50 +364,29 @@ export default {
             // The prompt hook also runs for submissions that are later rejected, so the text is taken from
             // here. Other locations' sessions belong to their own plugin instance.
             if (event.data.item.type === "user" && (!event.location || event.location.directory === directory)) {
-              pendingRequests.set(event.data.inboxID, event.data.item.payload.text);
+              requests.enqueued(event.data.inboxID, event.data.item.payload.text);
             }
             break;
           case "session.inbox.cancelled":
-            pendingRequests.delete(event.data.inboxID);
+            requests.cancelled(event.data.inboxID);
             break;
-          case "session.inbox.delivered": {
-            if (event.location && event.location.directory !== directory) break;
-            // Only now is it the request the session is working on. One queued behind a running turn, or
-            // cancelled before it started, never replaces the request that turn is answering.
-            const { inboxID } = event.data;
-            const known = pendingRequests.get(inboxID);
-            pendingRequests.delete(inboxID);
-            const supersede = () => {
-              // A new request makes any verdict still being worked out stale, and starts the loop guard afresh.
-              operations.cancel(sessionID);
-              loopHistories.delete(sessionID);
-            };
-            // Recorded so the gates still know the request after compaction drops it from the context window.
-            const persist = (text: string) => state.update(sessionID, { request: { id: inboxID, text } });
-            if (known !== undefined) {
-              supersede();
-              inOrder(sessionID, () => persist(known));
-            } else {
-              // The plugin was reloaded between the message being queued and delivered, so its text is read
-              // back from the session. Anything that is not a user message (a nudge, say) is ignored.
-              inOrder(sessionID, async () => {
-                const message = (await ctx.session.context({ sessionID })).find((item) => item.id === inboxID);
-                if (message?.type !== "user") return;
-                supersede();
-                await persist(message.text);
-              });
-            }
+          case "session.inbox.delivered":
+            if (!event.location || event.location.directory === directory) requests.delivered(sessionID, event.data.inboxID);
             break;
-          }
           case "session.execution.interrupted":
             operations.cancel(sessionID);
             break;
           case "session.deleted":
             operations.cancel(sessionID);
             loopHistories.delete(sessionID);
-            inOrder(sessionID, async () => {
-              await Promise.all([state.remove(sessionID), storedPlans.clear(sessionID)]);
-            });
+            // Behind any request write still in flight, so the deletion is not undone by it finishing late.
+            inOrder(
+              sessionID,
+              async () => {
+                await Promise.all([state.remove(sessionID), storedPlans.clear(sessionID)]);
+              },
+              reportState,
+            );
             break;
         }
       }

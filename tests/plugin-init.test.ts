@@ -471,3 +471,30 @@ test("a request queued before a plugin reload is recovered from the session when
   expect(first.stored.get("session/ses_1/request")).toEqual({ id: "m2", text: "second" });
   cleanupSecond?.();
 });
+
+test("a write still in flight in an unloaded plugin instance cannot replace a newer request", async () => {
+  const first = fakeContext({});
+  const set = first.ctx.storage.set.bind(first.ctx.storage);
+  let release = () => {};
+  (first.ctx.storage as { set: unknown }).set = async (key: string, value: never) => {
+    if (key === "session/ses_x/request") {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    }
+    return set(key, value);
+  };
+  const cleanupFirst = await plugin.setup(first.ctx);
+  await first.emitEvent(queued("ses_x", "m1", "first"));
+  await first.emitEvent(delivered("ses_x", "m1"));
+  cleanupFirst?.();
+
+  const second = fakeContext({}, first.stored);
+  const cleanupSecond = await plugin.setup(second.ctx);
+  await second.emitEvent(queued("ses_x", "m2", "second"));
+  await second.emitEvent(delivered("ses_x", "m2"));
+  release();
+  for (let turn = 0; turn < 50; turn++) await Promise.resolve();
+  expect(first.stored.get("session/ses_x/request")).toEqual({ id: "m2", text: "second" });
+  cleanupSecond?.();
+});
