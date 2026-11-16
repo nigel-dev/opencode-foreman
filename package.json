@@ -1,0 +1,48 @@
+{
+  "name": "@nigel-dev/opencode-foreman",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that routes requests, keeps agents working until the job is verified, and screens routine permission prompts with a decision model",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "bun test",
+    "check": "bun run typecheck && bun run lint && bun test && bun run build",
+    "prepublishOnly": "bun run check"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.3.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@opencode/plugin": "2.3.0",
+    "@types/bun": "^1.4.4",
+    "eslint": "^10.15.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.72.2"
+  },
+  "author": "Nigel Bazzeghin <nbazzeghin@gmail.com>",
+  "license": "MIT",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "agents",
+    "decision-model",
+    "jev"
+  ]
+}
