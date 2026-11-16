@@ -24,6 +24,23 @@ export interface PlanStatus {
   readonly done: number;
 }
 
+/** Whether the decision model answered the last time a gate asked it. */
+export interface Health {
+  /** `off` when no key is configured, `unknown` until the first call. */
+  readonly state: "ok" | "failing" | "unknown" | "off";
+  /** Why the last call failed, such as `HTTP 401` or `timed out`. */
+  readonly detail?: string;
+  readonly time?: number;
+}
+
+/** A project check the done gate is running right now. */
+export interface RunningCheck {
+  readonly command: string;
+  readonly index: number;
+  readonly total: number;
+  readonly startedAt: number;
+}
+
 export interface Status {
   readonly plan: PlanStatus | null;
   /** Most recent first. */
@@ -34,6 +51,10 @@ export interface Status {
   readonly configFiles: readonly string[];
   readonly logFile: string | null;
   readonly syncVariants: boolean;
+  readonly health: Health;
+  /** Supervision is paused for this session. */
+  readonly paused: boolean;
+  readonly check: RunningCheck | null;
 }
 
 const decision = {
@@ -61,17 +82,44 @@ export const foremanRpc = Rpc.define({
       },
       output: { type: "object" },
     },
+    /** Stops the project check running for a session, if any. */
+    cancelCheck: {
+      input: {
+        type: "object",
+        properties: { sessionID: { type: "string" } },
+        required: ["sessionID"],
+        additionalProperties: false,
+      },
+      output: { type: "object" },
+    },
   },
   events: {
     decision: { schema: decision },
     plan: {
       schema: { type: "object", properties: { sessionID: { type: "string" } }, required: ["sessionID"], additionalProperties: false },
     },
+    /** A session's check started or stopped, or its pause state changed; the TUI re-reads its status. */
+    session: {
+      schema: { type: "object", properties: { sessionID: { type: "string" } }, required: ["sessionID"], additionalProperties: false },
+    },
+    health: {
+      schema: {
+        type: "object",
+        properties: { state: { type: "string" }, detail: { type: "string" } },
+        required: ["state"],
+        additionalProperties: false,
+      },
+    },
     config: {
       schema: {
         type: "object",
-        properties: { files: { type: "array", items: { type: "string" } }, warnings: { type: "array", items: { type: "string" } } },
-        required: ["files", "warnings"],
+        properties: {
+          files: { type: "array", items: { type: "string" } },
+          warnings: { type: "array", items: { type: "string" } },
+          /** False when a file could not be read and the previous settings were kept. */
+          applied: { type: "boolean" },
+        },
+        required: ["files", "warnings", "applied"],
         additionalProperties: false,
       },
     },
@@ -88,6 +136,24 @@ export function parseDecision(value: unknown): Decision | undefined {
   if (typeof time !== "number" || !Number.isFinite(time) || typeof sessionID !== "string" || typeof action !== "string" || typeof reason !== "string") return undefined;
   if (!(GATES as readonly unknown[]).includes(gate)) return undefined;
   return { time, sessionID, gate: gate as Gate, action, reason, ...(typeof detail === "string" ? { detail } : {}) };
+}
+
+const HEALTH_STATES = ["ok", "failing", "unknown", "off"] as const;
+
+export function parseHealth(value: unknown): Health {
+  if (!isRecord(value) || !(HEALTH_STATES as readonly unknown[]).includes(value.state)) return { state: "unknown" };
+  return {
+    state: value.state as Health["state"],
+    ...(typeof value.detail === "string" ? { detail: value.detail } : {}),
+    ...(typeof value.time === "number" ? { time: value.time } : {}),
+  };
+}
+
+function parseCheck(value: unknown): RunningCheck | null {
+  if (!isRecord(value)) return null;
+  const { command, index, total, startedAt } = value;
+  if (typeof command !== "string" || typeof index !== "number" || typeof total !== "number" || typeof startedAt !== "number") return null;
+  return { command, index, total, startedAt };
 }
 
 /** JSON Schema values arrive untyped, so the TUI narrows the status before rendering it. */
@@ -107,5 +173,8 @@ export function parseStatus(value: unknown): Status | undefined {
     configFiles: Array.isArray(value.configFiles) ? value.configFiles.filter((file): file is string => typeof file === "string") : [],
     logFile: typeof value.logFile === "string" ? value.logFile : null,
     syncVariants: value.syncVariants !== false,
+    health: parseHealth(value.health),
+    paused: value.paused === true,
+    check: parseCheck(value.check),
   };
 }

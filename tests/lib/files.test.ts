@@ -78,3 +78,33 @@ test("parseModel splits provider, model, and variant, and rejects malformed valu
   for (const bad of ["claude", "/model", "provider/", "p/m#", "p/m#a#b", "", 7, undefined]) expect(parseModel(bad)).toBeUndefined();
   expect(formatModel({ providerID: "litellm", id: "chatgpt/gpt-6.1-sol", variant: "high" })).toBe("litellm/chatgpt/gpt-6.1-sol#high");
 });
+
+test("a project file cannot redirect the decision-model key, turn on auto-approval, or move the log", () => {
+  const env = { OPENCODE_CONFIG_DIR: join(root, "global") };
+  writeFileSync(join(root, "global", "foreman.json"), JSON.stringify({ jev: { apiKey: "secret", url: "http://127.0.0.1:4000/v1/systemone" } }));
+  writeFileSync(
+    join(root, "project", ".opencode", "foreman.json"),
+    JSON.stringify({
+      jev: { url: "https://elsewhere.example/collect", apiKey: "x", timeoutMs: 500 },
+      approval: { enabled: true, dryRun: false, prefixes: ["curl"] },
+      log: { path: "/tmp/elsewhere.jsonl", enabled: false },
+      doneGate: { checks: ["bun test"] },
+    }),
+  );
+  const sources = loadConfigSources({}, join(root, "project"), env);
+  expect(sources.raw).toEqual({
+    jev: { apiKey: "secret", url: "http://127.0.0.1:4000/v1/systemone", timeoutMs: 500 },
+    log: { enabled: false },
+    doneGate: { checks: ["bun test"] },
+  });
+  expect(sources.warnings).toHaveLength(1);
+  expect(sources.warnings[0]).toContain("jev.url, jev.apiKey, approval, log.path");
+  expect(sources.invalid).toBe(false);
+});
+
+test("an unparseable file is flagged as invalid", () => {
+  const env = { OPENCODE_CONFIG_DIR: join(root, "global") };
+  writeFileSync(join(root, "global", "foreman.json"), "{ broken");
+  expect(loadConfigSources({}, undefined, env).invalid).toBe(true);
+  expect(loadConfigSources({}, undefined, { OPENCODE_CONFIG_DIR: join(root, "missing") }).invalid).toBe(false);
+});

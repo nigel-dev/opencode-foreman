@@ -1,4 +1,4 @@
-import type { Decision, Gate, Status } from "../rpc.js";
+import type { Decision, Gate, Health, Status } from "../rpc.js";
 
 export type Tone = "info" | "success" | "warning" | "error";
 
@@ -22,6 +22,13 @@ const REPORT_REASON: Readonly<Record<string, string>> = {
   "no-outcome": "a subagent report gave no outcome and was sent back",
 };
 
+const EXHAUSTED_REASON: Readonly<Record<string, string>> = {
+  unfinished: "work still remains",
+  unverified: "completion is still unverified",
+  "checks-failed": "a project check still fails",
+  "plan-open": "the plan still has open tasks",
+};
+
 export function gateLabel(gate: Gate): string {
   return GATE_LABEL[gate];
 }
@@ -31,7 +38,11 @@ export function describeDecision(decision: Decision): string {
   const detail = decision.detail ? ` (${decision.detail})` : "";
   switch (decision.gate) {
     case "done":
-      return decision.action === "continue" ? `${DONE_REASON[decision.reason] ?? decision.reason}${detail}` : `left alone: ${decision.reason}`;
+      if (decision.action === "continue") return `${DONE_REASON[decision.reason] ?? decision.reason}${detail}`;
+      if (decision.action === "exhausted") return `${EXHAUSTED_REASON[decision.reason] ?? decision.reason}${detail}, and the continuation limit is used up`;
+      if (decision.action === "paused") return "supervision paused for this session";
+      if (decision.action === "resumed") return "supervision resumed for this session";
+      return `left alone: ${decision.reason}`;
     case "report":
       return decision.action === "revise" ? (REPORT_REASON[decision.reason] ?? decision.reason) : `left alone: ${decision.reason}`;
     case "intent":
@@ -51,8 +62,11 @@ export interface ToastText {
 
 /** Only decisions where Foreman stepped in get a toast; routine "left alone" verdicts and routing hints do not. */
 export function decisionToast(decision: Decision): ToastText | undefined {
+  if (decision.gate === "done" && (decision.action === "paused" || decision.action === "resumed")) {
+    return { title: "Foreman", message: decision.action === "paused" ? "Supervision paused for this session." : "Supervision resumed for this session.", variant: "info" };
+  }
   const acted =
-    (decision.gate === "done" && decision.action === "continue") ||
+    (decision.gate === "done" && (decision.action === "continue" || decision.action === "exhausted")) ||
     (decision.gate === "report" && decision.action === "revise") ||
     (decision.gate === "loop" && decision.action === "blocked") ||
     (decision.gate === "approval" && decision.action === "approved");
@@ -61,7 +75,12 @@ export function decisionToast(decision: Decision): ToastText | undefined {
   return {
     title: `Foreman: ${gateLabel(decision.gate).toLowerCase()}`,
     message: message.charAt(0).toUpperCase() + message.slice(1),
-    variant: decision.gate === "approval" ? "success" : decision.reason === "checks-failed" || decision.gate === "loop" ? "warning" : "info",
+    variant:
+      decision.gate === "approval"
+        ? "success"
+        : decision.action === "exhausted" || decision.reason === "checks-failed" || decision.gate === "loop"
+          ? "warning"
+          : "info",
   };
 }
 
@@ -79,6 +98,29 @@ export function progressBar(status: Status | undefined, width = 10): string {
   if (!plan || total === 0) return "";
   const filled = Math.round((plan.done / total) * width);
   return "█".repeat(filled) + "░".repeat(width - filled);
+}
+
+/** Whether the gates can actually reach the decision model, as opposed to merely being switched on. */
+export function healthText(health: Health): string {
+  switch (health.state) {
+    case "ok":
+      return `working${health.time ? ` (last answer ${clock(health.time)})` : ""}`;
+    case "failing":
+      return `not answering: ${health.detail ?? "unknown error"}${health.time ? ` at ${clock(health.time)}` : ""}. The gates that use it are doing nothing.`;
+    case "off":
+      return "no key is set, so only the loop guard, commands, and plan tracking run";
+    case "unknown":
+      return "not used yet since the plugin loaded";
+  }
+}
+
+/** Footer text for a running check, such as `checking bun test 12s`. */
+export function checkText(status: Status | undefined, now: number): string | undefined {
+  const check = status?.check;
+  if (!check) return undefined;
+  const seconds = Math.max(0, Math.round((now - check.startedAt) / 1000));
+  const position = check.total > 1 ? ` ${check.index + 1}/${check.total}` : "";
+  return `checking${position} ${check.command} ${seconds}s`;
 }
 
 function clock(time: number): string {
@@ -101,7 +143,9 @@ export function statusReport(status: Status, home: (path: string) => string = (p
   const off = (Object.keys(GATE_LABEL) as Gate[]).filter((gate) => !status.gates[gate]).map(gateLabel);
   lines.push(`On: ${on.length > 0 ? on.join(", ") : "nothing"}`);
   if (off.length > 0) lines.push(`Off: ${off.join(", ")}`);
-  if (!status.decisionModel) lines.push("No decision-model key is set, so only the loop guard can run.");
+  lines.push(`Decision model: ${healthText(status.health)}`);
+  if (status.paused) lines.push("Supervision is paused for this session. Run /foreman-resume to turn it back on.");
+  if (status.check) lines.push(`Running check ${status.check.index + 1} of ${status.check.total}: ${status.check.command}`);
   lines.push("");
   if (status.decisions.length === 0) {
     lines.push("No decisions recorded for this session yet.");

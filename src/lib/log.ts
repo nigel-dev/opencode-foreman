@@ -31,32 +31,43 @@ export interface DecisionLog {
   write(entry: Readonly<Record<string, unknown>>): Promise<void>;
 }
 
+// One append queue per file for the whole process, however many plugin instances or config reloads
+// write to it, so lines stay whole and two writers never rotate the same file at once.
+const QUEUES = Symbol.for("opencode-foreman.log.queues");
+function queues(): Map<string, Promise<void>> {
+  const holder = globalThis as { [QUEUES]?: Map<string, Promise<void>> };
+  return (holder[QUEUES] ??= new Map());
+}
+
+async function append(config: LogConfig, line: string): Promise<void> {
+  await mkdir(dirname(config.path), { recursive: true });
+  const size = await stat(config.path).then(
+    (info) => info.size,
+    () => 0,
+  );
+  if (size > config.maxBytes) {
+    // Another process may have rotated it first; then there is nothing left to move.
+    await rename(config.path, `${config.path}.1`).catch((error: unknown) => {
+      if ((error as { code?: string }).code !== "ENOENT") throw error;
+    });
+  }
+  await appendFile(config.path, line, "utf8");
+}
+
 export function createDecisionLog(config: LogConfig): DecisionLog {
   let warned = false;
-  // Appends are chained so lines stay whole and rotation never races a write.
-  let queue: Promise<void> = Promise.resolve();
-
-  const append = async (line: string) => {
-    await mkdir(dirname(config.path), { recursive: true });
-    const size = await stat(config.path).then(
-      (info) => info.size,
-      () => 0,
-    );
-    if (size > config.maxBytes) await rename(config.path, `${config.path}.1`);
-    await appendFile(config.path, line, "utf8");
-  };
-
   return {
     write(entry) {
       if (!config.enabled) return Promise.resolve();
-      queue = queue
-        .then(() => append(`${JSON.stringify(entry)}\n`))
+      const next = (queues().get(config.path) ?? Promise.resolve())
+        .then(() => append(config, `${JSON.stringify(entry)}\n`))
         .catch((error: unknown) => {
           if (warned) return;
           warned = true;
           console.warn(`[foreman] Could not write the decision log at ${config.path}: ${error instanceof Error ? error.message : String(error)}`);
         });
-      return queue;
+      queues().set(config.path, next);
+      return next;
     },
   };
 }

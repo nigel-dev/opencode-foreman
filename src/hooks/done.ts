@@ -2,7 +2,9 @@ import type { DoneGateConfig } from "../lib/config.js";
 import { probability, type Answers, type Decider, type Question } from "../lib/jev.js";
 import type { CheckResult } from "../lib/checks.js";
 import type { ActivePlan } from "../lib/plans.js";
-import { BoundedMap, head, lastTurn, tail, type SessionFacts, type SessionReader } from "../lib/sessions.js";
+import type { Operation } from "../lib/operations.js";
+import { head, lastTurn, tail, type SessionFacts, type SessionReader } from "../lib/sessions.js";
+import { identifyTurn, type SessionState } from "../lib/state.js";
 
 export const QUESTIONS = {
   work: {
@@ -43,15 +45,19 @@ export const QUESTIONS = {
   },
 } as const satisfies Record<string, Question>;
 
+export type ContinueReason = "unfinished" | "unverified" | "checks-failed" | "plan-open";
+
 export type Verdict =
   | { readonly action: "none"; readonly reason: string }
   | {
       readonly action: "continue";
-      readonly reason: "unfinished" | "unverified" | "checks-failed" | "plan-open";
+      readonly reason: ContinueReason;
       readonly text: string;
       /** The failed check command, when a check failed. */
       readonly detail?: string;
-    };
+    }
+  /** The gate would have told the agent to continue, but this request has used its continuations. */
+  | { readonly action: "exhausted"; readonly reason: ContinueReason; readonly detail?: string };
 
 const CONTINUE_UNFINISHED =
   "Your last message says work remains. Continue until the request is complete. If you are blocked on something only the user can resolve, say so plainly and stop.";
@@ -80,7 +86,7 @@ function planOpenText(plan: ActivePlan): string {
  * `claimed` marks a "none" verdict where the assistant says requested work is complete, which is the
  * point at which evidence (project checks, plan progress) is worth gathering.
  */
-export function judge(answers: Answers, threshold: number): Verdict & { readonly claimed?: boolean } {
+export function judge(answers: Answers, threshold: number): Exclude<Verdict, { action: "exhausted" }> & { readonly claimed?: boolean } {
   const read = (name: keyof typeof QUESTIONS) => probability(answers, name);
   const work = read("work");
   const blocked = read("blocked");
@@ -112,9 +118,10 @@ export interface DoneGateDeps {
   readonly decider: Decider;
   readonly sessions: Pick<SessionReader, "context">;
   readonly lookup: (sessionID: string) => Promise<SessionFacts>;
+  readonly state: SessionState;
   readonly nudge: (sessionID: string, text: string) => Promise<void>;
   /** Runs the configured project checks in a directory. Absent when none are configured. */
-  readonly runChecks?: ((directory: string) => Promise<CheckResult>) | undefined;
+  readonly runChecks?: ((directory: string, sessionID: string, signal: AbortSignal) => Promise<CheckResult>) | undefined;
   readonly activePlan?: ((sessionID: string) => Promise<ActivePlan | undefined>) | undefined;
   readonly clearPlan?: ((sessionID: string) => Promise<unknown>) | undefined;
 }
@@ -124,46 +131,50 @@ export interface IdleEvent {
   readonly background: ReadonlyArray<{ readonly sessionID: string }>;
 }
 
-export function createDoneGate(deps: DoneGateDeps): (event: IdleEvent) => Promise<Verdict> {
-  const nudges = new BoundedMap<string, { userID: string; count: number }>();
+const CANCELLED: Verdict = { action: "none", reason: "cancelled" };
 
-  return async (event) => {
+export function createDoneGate(deps: DoneGateDeps): (event: IdleEvent, operation: Operation) => Promise<Verdict> {
+  return async (event, operation) => {
     const { sessionID } = event;
     // The session is woken again when its own background work finishes, so judge it then.
     if (event.background.some((job) => job.sessionID === sessionID)) return { action: "none", reason: "background work running" };
     const facts = await deps.lookup(sessionID);
     if (facts.kind !== "root") return { action: "none", reason: "not a root session" };
 
+    const record = await deps.state.read(sessionID);
+    if (record.paused) return { action: "none", reason: "paused" };
+
     const turn = lastTurn(await deps.sessions.context({ sessionID }));
-    if (!turn) return { action: "none", reason: "no completed turn" };
+    const identity = turn && identifyTurn(turn, record);
+    if (!turn || !identity || turn.reply === "") return { action: "none", reason: "no completed turn" };
     if (turn.failed) return { action: "none", reason: "turn failed" };
 
-    const previous = nudges.get(sessionID);
-    const count = previous?.userID === turn.userID ? previous.count : 0;
-    if (count >= deps.config.maxContinuations) return { action: "none", reason: "continuation limit reached" };
-
-    const answers = await deps.decider.ask(
-      { request: head(turn.request, 4_000), final_message: tail(turn.reply, 8_000) },
-      QUESTIONS,
-    );
+    const answers = await deps.decider.ask({ request: head(identity.request, 4_000), final_message: tail(turn.reply, 8_000) }, QUESTIONS);
     if (!answers) return { action: "none", reason: "no decision" };
+    if (!operation.live()) return CANCELLED;
 
-    const send = async (verdict: Verdict): Promise<Verdict> => {
-      if (verdict.action === "continue") {
-        nudges.set(sessionID, { userID: turn.userID, count: count + 1 });
-        await deps.nudge(sessionID, verdict.text);
+    const used = record.nudges?.requestID === identity.requestID ? record.nudges.count : 0;
+    /** The limit caps how often the agent is restarted; it never stops the gate from looking at the result. */
+    const send = async (verdict: Extract<Verdict, { action: "continue" }>): Promise<Verdict> => {
+      if (used >= deps.config.maxContinuations) {
+        return { action: "exhausted", reason: verdict.reason, ...(verdict.detail ? { detail: verdict.detail } : {}) };
       }
+      // The user stopped the session or sent something new while this ran; nothing more may be put into it.
+      if (!operation.live()) return CANCELLED;
+      await deps.state.update(sessionID, { nudges: { requestID: identity.requestID, count: used + 1 } });
+      await deps.nudge(sessionID, verdict.text);
       return verdict;
     };
 
     const { claimed, ...verdict } = judge(answers, deps.config.threshold);
     if (verdict.action === "continue" && verdict.reason === "unfinished") return send(verdict);
-    if (verdict.action === "none" && verdict.reason !== "done") return verdict;
+    if (verdict.action !== "continue" && verdict.reason !== "done") return verdict;
 
     // The assistant says it is finished. From here, evidence outranks its wording.
     const checked = claimed === true && deps.runChecks !== undefined && facts.directory !== undefined;
     if (checked) {
-      const result = await deps.runChecks!(facts.directory!);
+      const result = await deps.runChecks!(facts.directory!, sessionID, operation.signal);
+      if (result.cancelled) return CANCELLED;
       const text = checksFailedText(result);
       if (text) return send({ action: "continue", reason: "checks-failed", text, detail: result.failure?.command ?? "" });
     } else if (verdict.action === "continue") {

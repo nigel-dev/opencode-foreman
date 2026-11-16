@@ -12,7 +12,7 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-function harness(bundledAgents = true) {
+function harness(bundledAgents = true, disabled: string[] = []) {
   const data = new Map<string, string>();
   const plans = createPlanStore({
     get: async (key) => data.get(key),
@@ -21,10 +21,12 @@ function harness(bundledAgents = true) {
   });
   const sent: string[] = [];
   const switched: string[] = [];
+  const paused: boolean[] = [];
   const commands = createCommands({
-    bundledAgents,
+    available: (agent) => bundledAgents && !disabled.includes(agent),
+    setPaused: async (_sessionID, value) => void paused.push(value),
     plans,
-    lookup: async () => ({ kind: "root", directory: root }),
+    lookup: async () => ({ kind: "root", parentID: undefined, directory: root }),
     fallbackDirectory: "/elsewhere",
     send: async (_input, text) => void sent.push(text),
     switchAgent: async (_sessionID, agent) => void switched.push(agent),
@@ -34,12 +36,15 @@ function harness(bundledAgents = true) {
     if (!command) throw new Error(`no command ${name}`);
     await command.execute({ sessionID: "ses_1", prompt: { text } });
   };
-  return { commands, run, sent, switched, plans };
+  return { commands, run, sent, switched, plans, paused };
 }
 
 test("agent-switching commands are only offered with the bundled agents", () => {
-  expect(harness(true).commands.map((command) => command.name)).toEqual(["handoff", "stop-work", "plan", "start-work", "review-work"]);
-  expect(harness(false).commands.map((command) => command.name)).toEqual(["handoff", "stop-work"]);
+  const names = (bundled: boolean, disabled: string[] = []) => harness(bundled, disabled).commands.map((command) => command.name);
+  const always = ["handoff", "stop-work", "foreman-pause", "foreman-resume"];
+  expect(names(true)).toEqual([...always, "plan", "start-work", "review-work"]);
+  expect(names(false)).toEqual(always);
+  expect(names(true, ["planner", "reviewer"])).toEqual([...always, "start-work"]);
 });
 
 test("/plan switches to the planner and passes the request through", async () => {
@@ -91,4 +96,12 @@ test("/handoff and /review-work append an optional focus", async () => {
   expect(sent[1]).toContain("Pay particular attention to: the auth changes");
   expect(sent[2]).toContain("`reviewer`");
   expect(sent[2]).toContain("focus on: error handling");
+});
+
+test("/foreman-pause and /foreman-resume change the pause state and send nothing into the session", async () => {
+  const { run, sent, paused } = harness();
+  await run("foreman-pause");
+  await run("foreman-resume");
+  expect(paused).toEqual([true, false]);
+  expect(sent).toEqual([]);
 });

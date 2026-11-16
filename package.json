@@ -32,7 +32,8 @@
     "test": "bun test",
     "smoke": "bun scripts/smoke.ts",
     "release": "semantic-release",
-    "prepublishOnly": "bun run build"
+    "prepublishOnly": "bun run build",
+    "check:pack": "./scripts/check-pack.sh"
   },
   "dependencies": {
     "@opencode/plugin": "^2.3.0"

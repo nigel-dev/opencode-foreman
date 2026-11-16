@@ -3,7 +3,8 @@ import { resolveConfig } from "../../src/lib/config.js";
 import { createDoneGate, judge } from "../../src/hooks/done.js";
 import type { CheckResult } from "../../src/lib/checks.js";
 import type { Answers } from "../../src/lib/jev.js";
-import { assistant, fakeDecider, noul, user } from "../helpers.js";
+import type { SessionState } from "../../src/lib/state.js";
+import { assistant, fakeDecider, liveOperation, memoryState, noul, user } from "../helpers.js";
 
 function answers(values: { work: number; blocked: number; unfinished: number; claimsDone: number; verified: number; waived?: number }): Answers {
   return Object.fromEntries(Object.entries({ waived: 0, ...values }).map(([name, value]) => [name, noul(value)]));
@@ -32,6 +33,7 @@ interface Options {
   max?: number;
   checks?: CheckResult;
   plan?: { open: number; done: number };
+  state?: SessionState;
 }
 
 function harness(decided: Answers | undefined, options: Options = {}) {
@@ -39,18 +41,23 @@ function harness(decided: Answers | undefined, options: Options = {}) {
   const state = { messages: options.messages ?? [user("u1", "Add a toggle"), assistant("Done, toggle added.")] };
   const decider = fakeDecider(decided);
   const ran: string[] = [];
+  const onCheck: { current?: () => Promise<void> | void } = {};
   const plan = { current: options.plan };
-  const gate = createDoneGate({
+  const sessions = options.state ?? memoryState();
+  const { operation, cancel } = liveOperation();
+  const raw = createDoneGate({
     config: resolveConfig({ doneGate: { maxContinuations: options.max ?? 2 } }).doneGate,
     decider,
     sessions: { context: async () => state.messages },
-    lookup: async () => ({ kind: (options.root ?? true) ? "root" : "child", directory: "/repo" }),
+    lookup: async () => ({ kind: (options.root ?? true) ? "root" : "child", parentID: undefined, directory: "/repo" }),
+    state: sessions,
     nudge: async (sessionID, text) => {
       nudges.push({ sessionID, text });
     },
     runChecks: options.checks
       ? async (directory) => {
           ran.push(directory);
+          await onCheck.current?.();
           return options.checks!;
         }
       : undefined,
@@ -59,7 +66,8 @@ function harness(decided: Answers | undefined, options: Options = {}) {
       plan.current = undefined;
     },
   });
-  return { gate, nudges, decider, state, ran, plan };
+  const gate = (event: Parameters<typeof raw>[0]) => raw(event, operation);
+  return { gate, nudges, decider, state, ran, plan, sessions, cancel, onCheck };
 }
 
 const idle = { sessionID: "ses_1", background: [] };
@@ -76,7 +84,7 @@ test("stops nudging at the limit and starts again for a new user request", async
   const { gate, nudges, state } = harness(UNFINISHED, { max: 2 });
   await gate(idle);
   await gate(idle);
-  expect(await gate(idle)).toEqual({ action: "none", reason: "continuation limit reached" });
+  expect(await gate(idle)).toEqual({ action: "exhausted", reason: "unfinished" });
   expect(nudges).toHaveLength(2);
   state.messages = [...state.messages, user("u2", "Now add tests"), assistant("Still working on tests.")];
   expect((await gate(idle)).action).toBe("continue");
@@ -115,8 +123,8 @@ test("does nothing when the work is done or the decision model is unavailable", 
   }
 });
 
-const PASS: CheckResult = { passed: ["bun test"], failure: undefined };
-const FAIL: CheckResult = { passed: [], failure: { command: "bun test", status: 1, output: "1 fail: expected 2, got 3" } };
+const PASS: CheckResult = { passed: ["bun test"], failure: undefined, cancelled: false };
+const FAIL: CheckResult = { passed: [], failure: { command: "bun test", status: 1, output: "1 fail: expected 2, got 3" }, cancelled: false };
 
 test("configured checks replace the wording check: a pass ends the turn even when nothing was said about checks", async () => {
   const { gate, nudges, ran } = harness(UNVERIFIED, { checks: PASS });
@@ -158,4 +166,57 @@ test("an active plan with open tasks keeps the session going, and a finished pla
 test("failing checks take priority over open plan tasks", async () => {
   const { gate } = harness(DONE, { checks: FAIL, plan: { open: 1, done: 0 } });
   expect(await gate(idle)).toMatchObject({ reason: "checks-failed" });
+});
+
+test("after compaction removes the user message, the recorded request is used", async () => {
+  const sessions = memoryState();
+  await sessions.update("ses_1", { request: { id: "u1", text: "Add a toggle" } });
+  const compacted = [{ type: "compaction", summary: "…" }, assistant("Done, toggle added.")];
+  const { gate, decider, nudges } = harness(UNVERIFIED, { messages: compacted, state: sessions });
+  expect(await gate(idle)).toMatchObject({ action: "continue", reason: "unverified" });
+  expect(decider.calls[0]?.state).toEqual({ request: "Add a toggle", final_message: "Done, toggle added." });
+  expect(nudges).toHaveLength(1);
+
+  const unknown = harness(UNVERIFIED, { messages: compacted });
+  expect(await unknown.gate(idle)).toEqual({ action: "none", reason: "no completed turn" });
+});
+
+test("the continuation limit survives a rebuilt gate, and the final result is still checked", async () => {
+  const sessions = memoryState();
+  const first = harness(DONE, { checks: FAIL, max: 1, state: sessions });
+  expect(await first.gate(idle)).toMatchObject({ action: "continue", reason: "checks-failed" });
+
+  // A config reload builds new gates; the count lives in the shared session state.
+  const rebuilt = harness(DONE, { checks: FAIL, max: 1, state: sessions });
+  expect(await rebuilt.gate(idle)).toEqual({ action: "exhausted", reason: "checks-failed", detail: "bun test" });
+  expect(rebuilt.ran).toEqual(["/repo"]);
+  expect(rebuilt.nudges).toHaveLength(0);
+
+  const fixed = harness(DONE, { checks: PASS, max: 1, state: sessions, plan: { open: 0, done: 2 } });
+  expect(await fixed.gate(idle)).toEqual({ action: "none", reason: "checks passed" });
+  expect(fixed.plan.current).toBeUndefined();
+});
+
+test("nothing is sent into a session that was stopped while the gate was working", async () => {
+  const duringCheck = harness(DONE, { checks: FAIL });
+  duringCheck.onCheck.current = () => duringCheck.cancel();
+  expect(await duringCheck.gate(idle)).toEqual({ action: "none", reason: "cancelled" });
+  expect(duringCheck.nudges).toHaveLength(0);
+
+  const cancelledRun = harness(DONE, { checks: { passed: [], failure: undefined, cancelled: true } });
+  expect(await cancelledRun.gate(idle)).toEqual({ action: "none", reason: "cancelled" });
+
+  const beforeNudge = harness(UNFINISHED);
+  beforeNudge.cancel();
+  expect(await beforeNudge.gate(idle)).toEqual({ action: "none", reason: "cancelled" });
+  expect(beforeNudge.nudges).toHaveLength(0);
+});
+
+test("a paused session is left alone without asking the model", async () => {
+  const sessions = memoryState();
+  await sessions.update("ses_1", { paused: true });
+  const { gate, decider, nudges } = harness(UNFINISHED, { state: sessions });
+  expect(await gate(idle)).toEqual({ action: "none", reason: "paused" });
+  expect(decider.calls).toHaveLength(0);
+  expect(nudges).toHaveLength(0);
 });

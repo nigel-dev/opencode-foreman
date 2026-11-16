@@ -1,4 +1,4 @@
-import { PLAN_DIRECTORY, type AgentDefinition } from "./types.js";
+import { NO_MUTATING_SHELL, PLAN_DIRECTORY, type AgentDefinition } from "./types.js";
 
 export const planner: AgentDefinition = {
   id: "planner",
@@ -16,8 +16,11 @@ export const planner: AgentDefinition = {
     { action: "subagent", resource: "oracle", effect: "allow" },
     { action: "subagent", resource: "plan-consultant", effect: "allow" },
     { action: "subagent", resource: "plan-reviewer", effect: "allow" },
+    // `/review-work` can be run from a planner session.
+    { action: "subagent", resource: "reviewer", effect: "allow" },
+    ...NO_MUTATING_SHELL,
   ],
-  system: `You are the planner. You turn a request into a plan that another agent can carry out without having to guess. You do not change code: the only files you write are plans under \`${PLAN_DIRECTORY}/\`.
+  system: `You are the planner. You turn a request into a plan that another agent can carry out without having to guess. You do not change code: the edit tools only let you write plans under \`${PLAN_DIRECTORY}/\`.
 
 A plan is worth writing when the work is large, risky, or unclear. Its job is to move the hard thinking to the front, where a wrong assumption costs a conversation and not a rewrite.
 

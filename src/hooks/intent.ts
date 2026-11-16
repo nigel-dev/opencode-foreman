@@ -58,7 +58,8 @@ export function classify(answers: Answers, minConfidence: number): Routing | und
   };
 }
 
-export function renderHint(routing: Routing, routes: Readonly<Record<Intent, string>>): string {
+/** `handling` is left out for agents that work alone, since the suggested handling is about delegating. */
+export function renderHint(routing: Routing, handling: string | undefined): string {
   const lines = [
     "## Foreman routing hint",
     "",
@@ -66,8 +67,8 @@ export function renderHint(routing: Routing, routes: Readonly<Record<Intent, str
     "",
     `- Intent: ${routing.intent} (confidence ${routing.confidence.toFixed(2)})`,
     `- Size: ${routing.complexity}`,
-    `- Suggested handling: ${routes[routing.intent]}`,
   ];
+  if (handling) lines.push(`- Suggested handling: ${handling}`);
   if (routing.ambiguous) lines.push("- The request looks ambiguous. Ask a clarifying question before acting.");
   return lines.join("\n");
 }
@@ -85,6 +86,7 @@ export interface PromptEvent {
 
 export interface ContextEvent {
   readonly sessionID: string;
+  readonly agent?: string;
   readonly system: Array<{ type: "text"; text: string }>;
 }
 
@@ -95,28 +97,31 @@ export interface IntentGate {
 }
 
 export function createIntentGate(deps: IntentGateDeps): IntentGate {
-  const hints = new BoundedMap<string, string>();
+  const routings = new BoundedMap<string, Routing>();
+  const solo = new Set(deps.config.soloAgents);
 
   return {
     async onPrompt(event) {
       const { sessionID } = event;
       // A new request invalidates the previous classification even when this one cannot be classified.
-      hints.delete(sessionID);
+      routings.delete(sessionID);
       const request = event.prompt.text.trim();
       if (request === "" || !(await deps.isRoot(sessionID))) return undefined;
       const answers = await deps.decider.ask(head(request, 8_000), QUESTIONS);
       const routing = answers && classify(answers, deps.config.minConfidence);
       if (!routing) return undefined;
-      hints.set(sessionID, renderHint(routing, deps.config.routes));
+      routings.set(sessionID, routing);
       return routing;
     },
     onContext(event) {
-      const hint = hints.get(event.sessionID);
+      const routing = routings.get(event.sessionID);
+      if (!routing) return;
+      const handling = event.agent !== undefined && solo.has(event.agent) ? undefined : deps.config.routes[routing.intent];
       // Injected per model request rather than written into the prompt, so the stored user message stays untouched.
-      if (hint) event.system.push({ type: "text", text: hint });
+      event.system.push({ type: "text", text: renderHint(routing, handling) });
     },
     clear() {
-      hints.clear();
+      routings.clear();
     },
   };
 }

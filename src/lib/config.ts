@@ -1,4 +1,4 @@
-import { ROSTER_ROUTES, TIERS, type Tier } from "../agents/index.js";
+import { ROSTER, SOLO_AGENTS, TIERS, rosterRoutes, type Tier } from "../agents/index.js";
 import { defaultLogPath, type LogConfig } from "./log.js";
 import { parseModel, type ModelRef } from "./models.js";
 
@@ -43,6 +43,8 @@ export interface IntentGateConfig {
   readonly enabled: boolean;
   readonly minConfidence: number;
   readonly routes: Readonly<Record<Intent, string>>;
+  /** Agents whose hint omits the suggested handling, because they do the work themselves. */
+  readonly soloAgents: readonly string[];
 }
 
 export interface ApprovalConfig {
@@ -169,6 +171,12 @@ function resolveAgents(options: Source, warnings: string[]): AgentsConfig {
   };
 }
 
+/** Whether a bundled agent (or OpenCode's `explore`, which the roster relies on) is registered and not disabled. */
+export function bundledAgentAvailable(agents: AgentsConfig, id: string): boolean {
+  if (agents.overrides[id]?.disabled) return false;
+  return id === "explore" || (agents.bundled && ROSTER.some((agent) => agent.id === id));
+}
+
 export function resolveConfig(
   options: Source = {},
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -185,7 +193,7 @@ export function resolveConfig(
   const routes = section(intentGate.routes);
   const apiKey = text(jev.apiKey, text(env.FOREMAN_JEV_API_KEY, ""));
   const agents = resolveAgents(options, warnings);
-  const defaultRoutes = agents.bundled ? ROSTER_ROUTES : DEFAULT_ROUTES;
+  const defaultRoutes = agents.bundled ? rosterRoutes((agent) => bundledAgentAvailable(agents, agent), DEFAULT_ROUTES) : DEFAULT_ROUTES;
 
   return {
     agents,
@@ -225,6 +233,7 @@ export function resolveConfig(
       routes: Object.fromEntries(
         INTENTS.map((intent) => [intent, text(routes[intent], defaultRoutes[intent])]),
       ) as Record<Intent, string>,
+      soloAgents: agents.bundled ? SOLO_AGENTS : [],
     },
     approval: {
       enabled: flag(approval.enabled, false),

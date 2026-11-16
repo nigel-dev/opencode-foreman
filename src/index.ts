@@ -3,13 +3,16 @@ import { applyAgents, assignedModels, type AgentEditor } from "./agents/register
 import { RepeatedCallError } from "./hooks/loop.js";
 import { resolveConfig } from "./lib/config.js";
 import { configDirectories, loadConfigSources } from "./lib/files.js";
+import { createLoopHistories } from "./hooks/loop.js";
 import { createDecisionLog, flattenAnswers, readRecentEntries } from "./lib/log.js";
 import { formatModel } from "./lib/models.js";
+import { createOperations } from "./lib/operations.js";
 import { createPlanStore, renderActivePlan, type PlanStore } from "./lib/plans.js";
 import { createSessionLookup } from "./lib/sessions.js";
+import { createSessionState } from "./lib/state.js";
 import { withTrace } from "./lib/trace.js";
 import { watchConfig } from "./lib/watch.js";
-import { foremanRpc, parseDecision, type Decision, type Gate, type Status } from "./rpc.js";
+import { foremanRpc, parseDecision, type Decision, type Gate, type Health, type RunningCheck, type Status } from "./rpc.js";
 import { buildRuntime, type Runtime } from "./runtime.js";
 
 const MODEL_CHECK_DELAY_MS = 5_000;
@@ -40,6 +43,12 @@ function catalogKeys(models: unknown): Set<string> {
   return keys;
 }
 
+/** Attachments keep their content but lose their position in the text, which the command has rewritten. */
+function withoutMentions(items: unknown): Record<string, unknown>[] | undefined {
+  if (!Array.isArray(items) || items.length === 0) return undefined;
+  return items.filter(isRecord).map(({ mention: _mention, ...rest }) => rest);
+}
+
 function planName(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1).replace(/\.md$/, "");
 }
@@ -51,15 +60,19 @@ export default {
     const cleanups: Array<() => void> = [];
     const recent: Decision[] = [];
     let configFiles: readonly string[] = [];
+    let disposed = false;
 
     const load = () => {
       const sources = loadConfigSources(ctx.options, directory);
       const warnings = [...sources.warnings];
       const config = resolveConfig(sources.raw, process.env, warnings);
       for (const warning of warnings) console.warn(`[foreman] ${warning}`);
-      configFiles = sources.files;
-      return { config, warnings };
+      return { config, warnings, files: sources.files, invalid: sources.invalid };
     };
+
+    const operations = createOperations();
+    const checks = new Map<string, RunningCheck>();
+    let health: Health = { state: "unknown" };
 
     const rpc = await ctx.rpc.register(foremanRpc, {
       status: async (input): Promise<Status> => {
@@ -80,12 +93,25 @@ export default {
           configFiles,
           logFile: config.log.enabled ? config.log.path : null,
           syncVariants: config.syncVariants,
+          health: runtime.decisionModel ? health : { state: "off" },
+          paused: sessionID ? (await state.read(sessionID)).paused === true : false,
+          check: (sessionID && checks.get(sessionID)) || null,
         };
+      },
+      cancelCheck: async (input) => {
+        const sessionID = isRecord(input) && typeof input.sessionID === "string" ? input.sessionID : "";
+        return { cancelled: checks.has(sessionID) && operations.cancel(sessionID) };
       },
     });
     const emit = (send: () => Promise<void>) => void send().catch((error: unknown) => report("event", error));
 
     const lookup = createSessionLookup(ctx.session);
+    const state = createSessionState({
+      get: (key) => ctx.storage.get(key),
+      set: (key, value) => ctx.storage.set(key, value as Parameters<typeof ctx.storage.set>[1]),
+      remove: (key) => ctx.storage.remove(key),
+    });
+    const loopHistories = createLoopHistories();
     const storedPlans = createPlanStore({
       get: (key) => ctx.storage.get(key),
       set: (key, value) => ctx.storage.set(key, value),
@@ -111,19 +137,58 @@ export default {
         sessions: ctx.session,
         lookup,
         plans,
+        state,
+        loopHistories,
         fallbackDirectory: directory,
         nudge: (description) => async (sessionID, text) => {
           await ctx.session.synthetic({ sessionID, text, description });
         },
         audit: (record) => ctx.storage.set(`approval/${record.time}-${sequence++}`, { ...record }),
-        // The invocation is OpenCode's own object; only its text is replaced.
-        send: async (input, text) => {
-          await ctx.session.prompt({ ...(input as unknown as Parameters<typeof ctx.session.prompt>[0]), text });
+        onDecisionModel: (outcome) => {
+          const next: Health = outcome.ok ? { state: "ok", time: Date.now() } : { state: "failing", detail: outcome.reason, time: Date.now() };
+          const changed = next.state !== health.state || next.detail !== health.detail;
+          health = next;
+          if (!changed) return;
+          if (next.state === "failing") console.warn(`[foreman] The decision model ${next.detail}; the gates that use it are doing nothing until it answers.`);
+          emit(() => rpc.events.emit("health", { state: next.state, ...(next.detail ? { detail: next.detail } : {}) }));
         },
-        switchAgent: (sessionID, agent) => ctx.session.switchAgent({ sessionID, agent }),
+        onCheck: (sessionID, progress) => {
+          if (progress) checks.set(sessionID, { ...progress, startedAt: Date.now() });
+          else checks.delete(sessionID);
+          emit(() => rpc.events.emit("session", { sessionID }));
+        },
+        send: async (input, text) => {
+          const files = withoutMentions(input.prompt.files);
+          const skills = withoutMentions(input.prompt.skills);
+          const agents = withoutMentions(input.prompt.agents);
+          const prompt = {
+            sessionID: input.sessionID,
+            text,
+            ...(files ? { files } : {}),
+            ...(skills ? { skills } : {}),
+            ...(agents ? { agents } : {}),
+            ...(input.delivery === "steer" || input.delivery === "queue" ? { delivery: input.delivery } : {}),
+          };
+          // The attachment shapes are OpenCode's own, passed through unchanged apart from their text offsets.
+          await ctx.session.prompt(prompt as unknown as Parameters<typeof ctx.session.prompt>[0]);
+        },
+        switchAgent: async (sessionID, agent) => {
+          await ctx.session.switchAgent({ sessionID, agent });
+          // A session keeps its own model when its agent changes, so the agent's configured model is applied too.
+          const model = assignedModels(runtime.config.agents).get(agent);
+          if (model) await ctx.session.switchModel({ sessionID, model: { providerID: model.providerID, id: model.id, ...(model.variant ? { variant: model.variant } : {}) } });
+        },
+        setPaused: async (sessionID, paused) => {
+          await state.update(sessionID, { paused });
+          if (paused) operations.cancel(sessionID);
+          record("done", sessionID, { action: paused ? "paused" : "resumed", reason: "by command" });
+          emit(() => rpc.events.emit("session", { sessionID }));
+        },
       });
 
-    let runtime = build(load().config);
+    const initial = load();
+    configFiles = initial.files;
+    let runtime = build(initial.config);
     let log = createDecisionLog(runtime.config.log);
     if (runtime.config.log.enabled) {
       // OpenCode reloads plugins freely, so the status view is seeded from the log rather than starting empty.
@@ -138,12 +203,12 @@ export default {
     }
 
     /** Keeps a decision for the status view, writes it to the log, and tells the TUI. */
-    const record = (
+    function record(
       gate: Gate,
       sessionID: string,
       outcome: { action: string; reason: string; detail?: string | undefined },
       trace?: { answers?: Parameters<typeof flattenAnswers>[0] | undefined; elapsedMs?: number | undefined },
-    ) => {
+    ): void {
       const decision: Decision = {
         time: Date.now(),
         sessionID,
@@ -161,7 +226,7 @@ export default {
         ...(trace?.answers ? { answers: flattenAnswers(trace.answers), jevMs: trace.elapsedMs } : {}),
       });
       emit(() => rpc.events.emit("decision", { ...decision }));
-    };
+    }
 
     // OpenCode's editor uses branded IDs; the fields written here are plain strings underneath.
     await ctx.agent.transform((editor) => applyAgents(editor as unknown as AgentEditor, runtime.config.agents));
@@ -171,8 +236,7 @@ export default {
         editor.add({
           name: command.name,
           description: command.description,
-          execute: ({ sessionID, prompt, delivery }) =>
-            command.execute({ sessionID, prompt, delivery } as unknown as Parameters<typeof command.execute>[0]),
+          execute: ({ sessionID, prompt, delivery }) => command.execute({ sessionID, prompt: prompt as unknown as { text: string }, delivery }),
         });
       }
     });
@@ -202,7 +266,7 @@ export default {
 
     await ctx.tool.hook("execute.before", (event) => {
       try {
-        runtime.loopGuard?.(event);
+        runtime.loopGuard?.check(event);
       } catch (error) {
         if (error instanceof RepeatedCallError) {
           record("loop", event.sessionID, { action: "blocked", reason: error.cycle === 1 ? "repeated call" : "repeated cycle", detail: event.tool });
@@ -220,25 +284,39 @@ export default {
     });
 
     await ctx.session.hook("experimental.idle", async (event) => {
+      if (disposed) return;
       // Each gate ignores the sessions that are not its own: root sessions for done, child sessions for report.
       const { doneGate, reportGate } = runtime;
-      if (doneGate) {
-        await withTrace(() => doneGate(event))
-          .then(({ result, ...trace }) => {
-            if (result.reason !== "not a root session") record("done", event.sessionID, result, trace);
-          })
-          .catch((error: unknown) => report("done gate", error));
-      }
-      if (reportGate) {
-        await withTrace(() => reportGate(event))
-          .then(({ result, ...trace }) => {
-            if (result.reason !== "not a subagent session") record("report", event.sessionID, result, trace);
-          })
-          .catch((error: unknown) => report("report gate", error));
+      if (!doneGate && !reportGate) return;
+      const operation = operations.begin(event.sessionID);
+      try {
+        if (doneGate) {
+          await withTrace(() => doneGate(event, operation))
+            .then(({ result, ...trace }) => {
+              if (result.reason !== "not a root session") record("done", event.sessionID, result, trace);
+            })
+            .catch((error: unknown) => report("done gate", error));
+        }
+        if (reportGate) {
+          await withTrace(() => reportGate(event, operation))
+            .then(({ result, ...trace }) => {
+              if (result.reason !== "not a subagent session") record("report", event.sessionID, result, trace);
+            })
+            .catch((error: unknown) => report("report gate", error));
+        }
+      } finally {
+        operation.end();
       }
     });
 
     await ctx.session.hook("prompt", async (event) => {
+      // A new request makes any verdict still being worked out stale, and starts the loop guard afresh.
+      operations.cancel(event.sessionID);
+      loopHistories.delete(event.sessionID);
+      // Recorded so the gates still know the request after compaction drops it from the context window.
+      await state
+        .update(event.sessionID, { request: { id: event.messageID, text: event.prompt.text } })
+        .catch((error: unknown) => report("request record", error));
       const gate = runtime.intentGate;
       if (!gate) return;
       await withTrace(() => gate.onPrompt(event))
@@ -264,21 +342,57 @@ export default {
         .catch((error: unknown) => report("approval gate", error));
     });
 
+    // Pressing Stop does not stop a hook that is already running, so a stopped session's gate run is
+    // cancelled here: its check is killed and nothing more is sent into the session.
+    const events = new AbortController();
+    cleanups.push(() => events.abort());
+    void (async () => {
+      for await (const event of ctx.event.subscribe({ types: ["session.execution.interrupted", "session.deleted"], signal: events.signal })) {
+        const { sessionID } = event.data;
+        operations.cancel(sessionID);
+        if (event.type === "session.deleted") {
+          loopHistories.delete(sessionID);
+          await Promise.all([state.remove(sessionID), storedPlans.clear(sessionID)]).catch((error: unknown) => report("session cleanup", error));
+        }
+      }
+    })().catch((error: unknown) => {
+      if (!events.signal.aborted) report("event subscription", error);
+    });
+
+    // Reloads run one at a time, and none starts or finishes its work after the plugin has unloaded.
+    let reloading: Promise<void> = Promise.resolve();
     const reload = async () => {
-      const { config, warnings } = load();
+      if (disposed) return;
+      const { config, warnings, files, invalid } = load();
+      if (invalid) {
+        // A file caught mid-edit must not switch the project to the settings that are left without it.
+        console.warn("[foreman] A config file could not be read; keeping the settings already in use.");
+        emit(() => rpc.events.emit("config", { files: [...configFiles], warnings: [...warnings], applied: false }));
+        return;
+      }
       runtime.intentGate?.clear();
       runtime = build(config);
+      configFiles = files;
       log = createDecisionLog(config.log);
       // Both transforms read the current runtime, so replaying them applies the new agents and commands.
       await ctx.agent.reload();
       await ctx.command.reload();
+      if (disposed) return;
       scheduleModelCheck();
       console.warn(`[foreman] Config reloaded from ${configFiles.length > 0 ? configFiles.join(", ") : "defaults"}.`);
-      emit(() => rpc.events.emit("config", { files: [...configFiles], warnings }));
+      emit(() => rpc.events.emit("config", { files: [...configFiles], warnings, applied: true }));
     };
-    cleanups.push(watchConfig(configDirectories(directory), () => void reload().catch((error: unknown) => report("config reload", error))));
+    cleanups.push(
+      watchConfig(configDirectories(directory), () => {
+        reloading = reloading.then(reload).catch((error: unknown) => report("config reload", error));
+      }),
+    );
     cleanups.push(() => runtime.intentGate?.clear());
 
-    return () => cleanups.forEach((cleanup) => cleanup());
+    return () => {
+      disposed = true;
+      operations.cancelAll();
+      cleanups.forEach((cleanup) => cleanup());
+    };
   },
 } satisfies Plugin.Plugin;

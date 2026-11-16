@@ -1,7 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { PLAN_DIRECTORY } from "../agents/types.js";
-import { BoundedMap } from "./sessions.js";
 
 export interface PlanProgress {
   readonly open: number;
@@ -77,31 +76,21 @@ export interface PlanStore {
 
 const key = (sessionID: string) => `plan/${sessionID}`;
 
+/** Storage is read on every call: plugin instances share it, so a cache in one would go stale when another writes. */
 export function createPlanStore(storage: PlanStorage): PlanStore {
-  // `null` records "looked up, none", so sessions without a plan do not hit storage on every model request.
-  const cache = new BoundedMap<string, string | null>();
-
   const pathFor = async (sessionID: string): Promise<string | undefined> => {
-    const cached = cache.get(sessionID);
-    if (cached !== undefined) return cached ?? undefined;
     const stored = await storage.get(key(sessionID));
-    const path = typeof stored === "string" && stored !== "" ? stored : null;
-    cache.set(sessionID, path);
-    return path ?? undefined;
+    return typeof stored === "string" && stored !== "" ? stored : undefined;
   };
 
   const clear = async (sessionID: string) => {
     const path = await pathFor(sessionID);
-    cache.set(sessionID, null);
     if (path) await storage.remove(key(sessionID));
     return path;
   };
 
   return {
-    async activate(sessionID, path) {
-      cache.set(sessionID, path);
-      await storage.set(key(sessionID), path);
-    },
+    activate: (sessionID, path) => storage.set(key(sessionID), path),
     clear,
     async active(sessionID) {
       const path = await pathFor(sessionID);

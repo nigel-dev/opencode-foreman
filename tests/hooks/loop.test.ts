@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
-import { createLoopGuard, fingerprint, RepeatedCallError, repeatingCycle } from "../../src/hooks/loop.js";
+import { createLoopGuard, createLoopHistories, fingerprint, RepeatedCallError, repeatingCycle } from "../../src/hooks/loop.js";
 import { resolveConfig } from "../../src/lib/config.js";
 
-const guard = (options: Record<string, unknown> = {}) => createLoopGuard(resolveConfig({ loopGuard: options }, {}).loopGuard);
+const loopGuard = (options: Record<string, unknown> = {}, histories = createLoopHistories()) =>
+  createLoopGuard(resolveConfig({ loopGuard: options }, {}).loopGuard, histories);
+const guard = (options: Record<string, unknown> = {}) => loopGuard(options).check;
 const call = (tool: string, input: unknown, sessionID = "ses_1") => ({ sessionID, tool, input });
 
 test("fingerprint ignores argument order and distinguishes tools and values", () => {
@@ -74,4 +76,20 @@ test("an edit-and-test loop with changing edits is never blocked", () => {
     onCall(call("edit", { path: "a", newString: `v${i}` }));
     onCall(call("shell", { command: "bun test" }));
   }
+});
+
+test("a reset forgets the session, and history outlives a rebuilt guard", () => {
+  const histories = createLoopHistories();
+  const first = loopGuard({ maxRepeats: 2 }, histories);
+  first.check(call("shell", { command: "git status" }));
+  first.check(call("shell", { command: "git status" }));
+
+  // A config reload builds a new guard over the same histories.
+  const rebuilt = loopGuard({ maxRepeats: 2 }, histories);
+  expect(() => rebuilt.check(call("shell", { command: "git status" }))).toThrow(RepeatedCallError);
+
+  // A new user request resets the count, so asking for the same thing again is not a loop.
+  rebuilt.reset("ses_1");
+  rebuilt.check(call("shell", { command: "git status" }));
+  rebuilt.check(call("shell", { command: "git status" }));
 });

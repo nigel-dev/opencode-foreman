@@ -31,6 +31,9 @@ jobs:
       - name: Lint
         run: bun run lint
 
+      - name: Install the packed package
+        run: bun run check:pack
+
       - name: Test
         shell: bash
         run: |

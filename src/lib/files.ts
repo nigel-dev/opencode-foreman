@@ -10,6 +10,8 @@ export interface ConfigSources {
   readonly raw: RawConfig;
   readonly files: readonly string[];
   readonly warnings: readonly string[];
+  /** A config file exists but could not be read or parsed, so `raw` is missing its settings. */
+  readonly invalid: boolean;
 }
 
 export const CONFIG_FILE_NAMES = ["foreman.jsonc", "foreman.json"] as const;
@@ -64,28 +66,59 @@ function findFile(directory: string): string | undefined {
   return CONFIG_FILE_NAMES.map((name) => join(directory, name)).find((path) => existsSync(path));
 }
 
+/**
+ * Settings a project file may not set, because a repository is not trusted the way the user's own config
+ * is: where the decision-model key is sent, what shell commands are approved without asking, and which
+ * file the log is written to.
+ */
+function restrictProject(config: Record<string, unknown>, path: string, warnings: string[]): Record<string, unknown> {
+  const restricted = { ...config };
+  const ignored: string[] = [];
+  if (isRecord(restricted.jev)) {
+    const { url, apiKey, ...jev } = restricted.jev;
+    if (url !== undefined) ignored.push("jev.url");
+    if (apiKey !== undefined) ignored.push("jev.apiKey");
+    restricted.jev = jev;
+  }
+  if (restricted.approval !== undefined) {
+    ignored.push("approval");
+    delete restricted.approval;
+  }
+  if (isRecord(restricted.log) && restricted.log.path !== undefined) {
+    const { path: _path, ...log } = restricted.log;
+    ignored.push("log.path");
+    restricted.log = log;
+  }
+  if (ignored.length > 0) warnings.push(`${path} sets ${ignored.join(", ")}, which only the global config may set; ignored.`);
+  return restricted;
+}
+
 export function loadConfigSources(
   options: RawConfig,
   projectDirectory: string | undefined,
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): ConfigSources {
-  const candidates = configDirectories(projectDirectory, env).map(findFile);
+  const globalDirectory = globalConfigDir(env);
   const files: string[] = [];
   const warnings: string[] = [];
   let raw = options;
-  for (const path of candidates) {
+  let invalid = false;
+  for (const directory of configDirectories(projectDirectory, env)) {
+    const path = findFile(directory);
     if (!path || files.includes(path)) continue;
     try {
       const parsed = parseJsonc(readFileSync(path, "utf8"));
       if (!isRecord(parsed)) {
         warnings.push(`${path} is not a JSON object; ignored.`);
+        invalid = true;
         continue;
       }
-      raw = mergeConfig(raw, parsed);
+      raw = mergeConfig(raw, directory === globalDirectory ? parsed : restrictProject(parsed, path, warnings));
       files.push(path);
     } catch (error) {
       warnings.push(`${path} could not be read: ${error instanceof Error ? error.message : String(error)}`);
+      invalid = true;
     }
   }
-  return { raw: substituteEnv(raw, env, warnings) as RawConfig, files, warnings };
+  return { raw: substituteEnv(raw, env, warnings) as RawConfig, files, warnings, invalid };
 }

@@ -27,7 +27,7 @@ test("classify maps answers to a routing and rejects weak or unknown intents", (
 });
 
 test("renderHint uses the configured route and flags ambiguity", () => {
-  const hint = renderHint({ intent: "implement", confidence: 0.91, complexity: "moderate", ambiguous: true }, config.routes);
+  const hint = renderHint({ intent: "implement", confidence: 0.91, complexity: "moderate", ambiguous: true }, config.routes.implement);
   expect(hint).toContain("Intent: implement (confidence 0.91)");
   expect(hint).toContain("Send it to worker-deep.");
   expect(hint).toContain("Ask a clarifying question");
@@ -81,4 +81,25 @@ test("empty prompts and child sessions are not classified", async () => {
   await child.gate.onPrompt({ sessionID: "ses_1", prompt: { text: "Build it" } });
   expect(child.decider.calls).toHaveLength(0);
   expect(child.systemFor("ses_1")).toEqual([]);
+});
+
+test("agents that work alone get the classification without the delegation advice", async () => {
+  const gate = createIntentGate({ config: resolveConfig({}, {}).intentGate, decider: fakeDecider(answers("implement", 0.9, 1, 0)), isRoot: async () => true });
+  await gate.onPrompt({ sessionID: "ses_1", prompt: { text: "Add a dark mode toggle" } });
+  const systemFor = (agent: string) => {
+    const event = { sessionID: "ses_1", agent, system: [] as Array<{ type: "text"; text: string }> };
+    gate.onContext(event);
+    return event.system[0]?.text ?? "";
+  };
+  expect(systemFor("orchestrator")).toContain("Suggested handling");
+  expect(systemFor("deep")).toContain("Intent: implement");
+  expect(systemFor("deep")).not.toContain("Suggested handling");
+  expect(systemFor("planner")).not.toContain("Suggested handling");
+});
+
+test("a route that names a disabled agent falls back to generic wording", () => {
+  const routes = resolveConfig({ agents: { librarian: { disabled: true }, "worker-deep": { disabled: true } } }, {}).intentGate.routes;
+  expect(routes.research).not.toContain("`librarian`");
+  expect(routes.implement).not.toContain("`worker-deep`");
+  expect(routes.plan).toContain("`planner`");
 });

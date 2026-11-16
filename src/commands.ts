@@ -4,7 +4,9 @@ import type { SessionFacts } from "./lib/sessions.js";
 
 export interface CommandInvocation {
   readonly sessionID: string;
-  readonly prompt: { readonly text: string };
+  /** OpenCode's prompt, passed through so attachments reach the submitted prompt. Only `text` is read here. */
+  readonly prompt: { readonly text: string } & Readonly<Record<string, unknown>>;
+  readonly delivery?: unknown;
 }
 
 export interface CommandDefinition {
@@ -14,14 +16,17 @@ export interface CommandDefinition {
 }
 
 export interface CommandDeps {
-  /** Whether the bundled agents are registered; the commands that switch to them are only offered when they are. */
-  readonly bundledAgents: boolean;
+  /** Whether a bundled agent is registered and enabled; a command is only offered when the agent it needs is. */
+  readonly available: (agent: string) => boolean;
   readonly plans: PlanStore;
   readonly lookup: (sessionID: string) => Promise<SessionFacts>;
   readonly fallbackDirectory: string;
   /** Submits a user prompt to the session, keeping the invocation's attachments and delivery mode. */
   readonly send: (input: CommandInvocation, text: string) => Promise<void>;
+  /** Switches the session to an agent and to that agent's configured model, when it has one. */
   readonly switchAgent: (sessionID: string, agent: string) => Promise<void>;
+  /** Pauses or resumes supervision for the session. Sends nothing into the session. */
+  readonly setPaused: (sessionID: string, paused: boolean) => Promise<void>;
 }
 
 const HANDOFF = `Write a handoff so this work can continue in a fresh session with no memory of this one. Write it for a reader who has seen none of this conversation. Use these sections:
@@ -63,10 +68,21 @@ export function createCommands(deps: CommandDeps): CommandDefinition[] {
     },
   ];
 
-  if (!deps.bundledAgents) return commands;
-
   commands.push(
     {
+      name: "foreman-pause",
+      description: "Pause Foreman's done gate, checks, and report gate for this session",
+      execute: (input) => deps.setPaused(input.sessionID, true),
+    },
+    {
+      name: "foreman-resume",
+      description: "Resume Foreman's supervision for this session",
+      execute: (input) => deps.setPaused(input.sessionID, false),
+    },
+  );
+
+  if (deps.available("planner")) {
+    commands.push({
       name: "plan",
       description: "Switch to the planner and plan the described work",
       execute: async (input) => {
@@ -74,8 +90,11 @@ export function createCommands(deps: CommandDeps): CommandDefinition[] {
         const request = input.prompt.text.trim();
         await deps.send(input, request || "I want to plan some work. Ask me what it is.");
       },
-    },
-    {
+    });
+  }
+
+  if (deps.available("orchestrator")) {
+    commands.push({
       name: "start-work",
       description: `Carry out a plan from ${PLAN_DIRECTORY}/ with the orchestrator`,
       execute: async (input) => {
@@ -91,8 +110,11 @@ export function createCommands(deps: CommandDeps): CommandDefinition[] {
           `Carry out the plan at \`${plan.path}\`. Read it fully first, then work through its open tasks in order, ticking each checkbox in the plan file once the task is done and verified.`,
         );
       },
-    },
-    {
+    });
+  }
+
+  if (deps.available("reviewer")) {
+    commands.push({
       name: "review-work",
       description: "Have the reviewer subagent independently review the current changes",
       execute: (input) => {
@@ -102,7 +124,7 @@ export function createCommands(deps: CommandDeps): CommandDefinition[] {
           `Send the \`reviewer\` subagent to review the current changes in this repository. Give it what the changes were meant to achieve${focus ? ` and ask it to focus on: ${focus}` : ""}. When it reports, give me its verdict and findings in order of severity. Do not fix anything until I say so.`,
         );
       },
-    },
-  );
+    });
+  }
   return commands;
 }

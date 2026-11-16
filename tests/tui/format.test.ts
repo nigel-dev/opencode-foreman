@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { parseDecision, parseStatus, type Decision, type Status } from "../../src/rpc.js";
-import { decisionToast, describeDecision, desiredVariant, planSummary, progressBar, statusReport } from "../../src/tui/format.js";
+import { checkText, decisionToast, describeDecision, desiredVariant, healthText, planSummary, progressBar, statusReport } from "../../src/tui/format.js";
 
 const decision = (fields: Partial<Decision>): Decision => ({ time: 0, sessionID: "ses_1", gate: "done", action: "none", reason: "done", ...fields });
 
@@ -12,6 +12,9 @@ const status = (fields: Partial<Status> = {}): Status => ({
   configFiles: [],
   logFile: null,
   syncVariants: true,
+  health: { state: "ok" },
+  paused: false,
+  check: null,
   ...fields,
 });
 
@@ -73,10 +76,10 @@ test("statusReport lists the plan, gates, decisions, config, and log", () => {
   expect(report).toContain("Config: ~/.config/opencode/foreman.jsonc");
   expect(report).toContain("Log: ~/.local/share/opencode/foreman/decisions.jsonl");
 
-  const empty = statusReport(status({ decisionModel: false }));
+  const empty = statusReport(status({ decisionModel: false, health: { state: "off" } }));
   expect(empty).toContain("Plan: none active");
   expect(empty).toContain("No decisions recorded");
-  expect(empty).toContain("only the loop guard can run");
+  expect(empty).toContain("no key is set, so only the loop guard");
   expect(empty).toContain("defaults (no foreman.json found)");
 });
 
@@ -99,4 +102,28 @@ test("desiredVariant uses the session's agent, else the variant the primary agen
   expect(desiredVariant(split, model(opus))).toBeUndefined();
   expect(desiredVariant(split, model(opus), "custom")).toBe("low");
   expect(desiredVariant([{ id: "hidden", mode: "primary", hidden: true, model: { ...opus, variant: "max" } }], model(opus))).toBeUndefined();
+});
+
+test("health, pause, and a running check are shown in the status report and footer", () => {
+  expect(healthText({ state: "failing", detail: "HTTP 401" })).toContain("not answering: HTTP 401");
+  expect(healthText({ state: "unknown" })).toContain("not used yet");
+  const busy = status({ paused: true, health: { state: "failing", detail: "timed out" }, check: { command: "bun test", index: 1, total: 2, startedAt: 10_000 } });
+  const report = statusReport(busy);
+  expect(report).toContain("Decision model: not answering: timed out");
+  expect(report).toContain("Supervision is paused");
+  expect(report).toContain("Running check 2 of 2: bun test");
+  expect(checkText(busy, 22_400)).toBe("checking 2/2 bun test 12s");
+  expect(checkText(status({ check: { command: "bun test", index: 0, total: 1, startedAt: 0 } }), 3_000)).toBe("checking bun test 3s");
+  expect(checkText(status(), 0)).toBeUndefined();
+});
+
+test("an exhausted limit and a pause each produce a toast", () => {
+  expect(decisionToast(decision({ action: "exhausted", reason: "checks-failed", detail: "bun test" }))).toEqual({
+    title: "Foreman: done gate",
+    message: "A project check still fails (bun test), and the continuation limit is used up",
+    variant: "warning",
+  });
+  expect(decisionToast(decision({ action: "paused", reason: "by command" }))?.message).toBe("Supervision paused for this session.");
+  expect(decisionToast(decision({ action: "resumed", reason: "by command" }))?.variant).toBe("info");
+  expect(decisionToast(decision({ action: "none", reason: "cancelled" }))).toBeUndefined();
 });

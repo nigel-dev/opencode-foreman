@@ -62,3 +62,21 @@ test("resolves to undefined on HTTP errors, network errors, and malformed bodies
 test("a response missing any requested answer is rejected whole", () => {
   expect(parseAnswers(body, ["verified", "missing"])).toBeUndefined();
 });
+
+test("each call's outcome is reported, with the reason for a failure", async () => {
+  const question = { q: { type: "noul", instructions: "?" } } as const;
+  const outcomes: unknown[] = [];
+  const observe = (outcome: unknown) => void outcomes.push(outcome);
+  await createJevDecider(jev, async () => Response.json({ answers: { q: { type: "noul", noul: 0.5 } } }), observe)?.ask("s", question);
+  await createJevDecider(jev, async () => new Response("no", { status: 401 }), observe)?.ask("s", question);
+  await createJevDecider(jev, async () => Response.json({ answers: {} }), observe)?.ask("s", question);
+  await createJevDecider(jev, async () => { throw new Error("offline"); }, observe)?.ask("s", question);
+  await createJevDecider(jev, async () => { throw new DOMException("slow", "TimeoutError"); }, observe)?.ask("s", question);
+  expect(outcomes).toEqual([
+    { ok: true },
+    { ok: false, reason: "HTTP 401" },
+    { ok: false, reason: "unusable response" },
+    { ok: false, reason: "could not be reached" },
+    { ok: false, reason: "timed out" },
+  ]);
+});

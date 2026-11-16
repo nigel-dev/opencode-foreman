@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveConfig } from "../src/lib/config.js";
 import plugin from "../src/index.js";
-import { BoundedMap, createRootCheck, lastTurn } from "../src/lib/sessions.js";
+import { BoundedMap, createSessionLookup, lastTurn } from "../src/lib/sessions.js";
 import { assistant, user } from "./helpers.js";
 
 const saved = { key: process.env.FOREMAN_JEV_API_KEY, dir: process.env.OPENCODE_CONFIG_DIR, data: process.env.XDG_DATA_HOME };
@@ -39,9 +39,17 @@ interface Draft {
   system?: string;
 }
 
+interface Registered {
+  name: string;
+  execute(input: { sessionID: string; prompt: Record<string, unknown>; delivery: string }): Promise<void>;
+}
+
 function fakeContext(options: Record<string, unknown>) {
   const hooks: string[] = [];
   const commands: string[] = [];
+  const registered = new Map<string, Registered>();
+  const calls: Array<Record<string, unknown>> = [];
+  const stored = new Map<string, unknown>();
   const replay = { agents: () => {}, commands: () => {} };
   const rpc: { status: (input: unknown) => Promise<unknown>; events: string[] } = { status: async () => undefined, events: [] };
   const agents = new Map<string, Draft>([["explore", { name: "Explore", mode: "subagent", hidden: false, permissions: [] }]]);
@@ -80,23 +88,49 @@ function fakeContext(options: Record<string, unknown>) {
       },
     },
     model: { list: async () => [] },
-    session: { hook, get: async () => ({}), context: async () => [], synthetic: async () => ({}) },
+    session: {
+      hook,
+      get: async () => ({}),
+      context: async () => [],
+      synthetic: async () => ({}),
+      prompt: async (input: unknown) => void calls.push({ prompt: input }),
+      switchAgent: async (input: unknown) => void calls.push({ switchAgent: input }),
+      switchModel: async (input: unknown) => void calls.push({ switchModel: input }),
+    },
+    event: {
+      // An event stream that stays open and silent until the plugin unloads.
+      subscribe: ({ signal }: { signal: AbortSignal }) => ({
+        [Symbol.asyncIterator]: () => ({
+          next: () => new Promise<IteratorResult<never>>((resolve) => signal.addEventListener("abort", () => resolve({ done: true, value: undefined }), { once: true })),
+        }),
+      }),
+    },
     permission: { hook },
     tool: { hook },
     command: {
-      transform: async (callback: (e: { add(command: { name: string }): void }) => void) => {
+      transform: async (callback: (e: { add(command: Registered): void }) => void) => {
         replay.commands = () => {
           commands.length = 0;
-          callback({ add: (command) => void commands.push(command.name) });
+          registered.clear();
+          callback({
+            add: (command) => {
+              commands.push(command.name);
+              registered.set(command.name, command);
+            },
+          });
         };
         replay.commands();
         return { dispose: async () => {} };
       },
       reload: async () => replay.commands(),
     },
-    storage: { get: async () => undefined, set: async () => {}, remove: async () => {} },
+    storage: {
+      get: async (key: string) => stored.get(key),
+      set: async (key: string, value: unknown) => void stored.set(key, value),
+      remove: async (key: string) => void stored.delete(key),
+    },
   } as unknown as Setup;
-  return { ctx, hooks, agents, state, commands, rpc };
+  return { ctx, hooks, agents, state, commands, rpc, registered, calls, stored };
 }
 
 // Hooks are always registered and consult the current config when they fire, so a config change needs no re-registration.
@@ -106,7 +140,7 @@ test("without an API key the agents are registered and the gates are not", async
   const { ctx, hooks, agents, commands } = fakeContext({});
   const cleanup = await plugin.setup(ctx);
   expect(hooks).toEqual(ALL_HOOKS);
-  expect(commands).toEqual(["handoff", "stop-work", "plan", "start-work", "review-work"]);
+  expect(commands).toEqual(["handoff", "stop-work", "foreman-pause", "foreman-resume", "plan", "start-work", "review-work"]);
   expect(agents.has("orchestrator")).toBe(true);
   expect(agents.get("orchestrator")?.model).toBeUndefined();
   cleanup?.();
@@ -192,23 +226,25 @@ test("lastTurn returns the latest request and the final assistant text after it"
     assistant("final reply"),
   ]);
   expect(turn).toEqual({ userID: "u2", request: "second", reply: "final reply", failed: false });
-  expect(lastTurn([assistant("orphan")])).toBeUndefined();
+  expect(lastTurn([])).toBeUndefined();
 });
 
-test("root check caches results and treats lookup failures as not root", async () => {
-  let lookups = 0;
-  const isRoot = createRootCheck({
+test("lastTurn keeps an assistant reply whose user message was compacted away", () => {
+  expect(lastTurn([{ type: "compaction" }, assistant("still here")])).toEqual({ userID: undefined, request: undefined, reply: "still here", failed: false });
+  expect(lastTurn([user("u1", "hi")])).toBeUndefined();
+  expect(lastTurn([user("u1", "hi"), { type: "assistant", content: [], finish: "stop" }])?.reply).toBe("");
+});
+
+test("session lookup reports parents and treats failures as unknown", async () => {
+  const lookup = createSessionLookup({
     get: async ({ sessionID }) => {
-      lookups++;
       if (sessionID === "broken") throw new Error("gone");
-      return sessionID === "child" ? { parentID: "ses_parent" } : {};
+      return sessionID === "child" ? { parentID: "ses_parent", location: { directory: "/repo" } } : {};
     },
   });
-  expect(await isRoot("root")).toBe(true);
-  expect(await isRoot("root")).toBe(true);
-  expect(await isRoot("child")).toBe(false);
-  expect(await isRoot("broken")).toBe(false);
-  expect(lookups).toBe(3);
+  expect(await lookup("root")).toEqual({ kind: "root", parentID: undefined, directory: undefined });
+  expect(await lookup("child")).toEqual({ kind: "child", parentID: "ses_parent", directory: "/repo" });
+  expect((await lookup("broken")).kind).toBe("unknown");
 });
 
 test("BoundedMap evicts the oldest entry past its limit", () => {
@@ -247,5 +283,49 @@ test("the status view is seeded from the decision log for this directory", async
   const status = (await rpc.status({ sessionID: "ses_1" })) as { decisions: Array<{ reason: string; time: number }> };
   expect(status.decisions.map((decision) => decision.reason)).toEqual(["newer", "older"]);
   expect(status.decisions[0]?.time).toBe(Date.parse("2026-11-16T05:00:00.000Z"));
+  cleanup?.();
+});
+
+test("/plan keeps attachments, drops their text offsets, and switches to the planner's model", async () => {
+  const { ctx, registered, calls } = fakeContext({ models: { reasoning: "anthropic/claude-fable-5-2#high" } });
+  const cleanup = await plugin.setup(ctx);
+  await registered.get("plan")?.execute({
+    sessionID: "ses_1",
+    prompt: {
+      text: " add OAuth ",
+      files: [{ uri: "file:///shot.png", mention: { start: 0, end: 4, text: "@shot" } }],
+      skills: [{ id: "frontend" }],
+    },
+    delivery: "queue",
+  });
+  expect(calls).toEqual([
+    { switchAgent: { sessionID: "ses_1", agent: "planner" } },
+    { switchModel: { sessionID: "ses_1", model: { providerID: "anthropic", id: "claude-fable-5-2", variant: "high" } } },
+    { prompt: { sessionID: "ses_1", text: "add OAuth", files: [{ uri: "file:///shot.png" }], skills: [{ id: "frontend" }], delivery: "queue" } },
+  ]);
+  cleanup?.();
+});
+
+test("/foreman-pause is stored, shown in the status, and survives a plugin reload", async () => {
+  const first = fakeContext({});
+  const cleanup = await plugin.setup(first.ctx);
+  await first.registered.get("foreman-pause")?.execute({ sessionID: "ses_1", prompt: { text: "" }, delivery: "steer" });
+  expect(await first.rpc.status({ sessionID: "ses_1" })).toMatchObject({ paused: true, check: null, health: { state: "off" } });
+  expect(await first.rpc.status({ sessionID: "ses_2" })).toMatchObject({ paused: false });
+  expect(first.calls).toEqual([]);
+  cleanup?.();
+});
+
+test("a config file that cannot be parsed keeps the settings already in use", async () => {
+  writeFileSync(join(root, "global", "foreman.jsonc"), `{ "commands": false }`);
+  const { ctx, commands, rpc } = fakeContext({});
+  const cleanup = await plugin.setup(ctx);
+  expect(commands).toEqual([]);
+
+  writeFileSync(join(root, "global", "foreman.jsonc"), `{ "commands": fal`);
+  for (let waited = 0; waited < 3_000 && !rpc.events.includes("config"); waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(rpc.events).toContain("config");
+  // Without the file the default would turn the commands back on.
+  expect(commands).toEqual([]);
   cleanup?.();
 });

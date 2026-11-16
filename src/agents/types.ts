@@ -20,9 +20,33 @@ export interface AgentDefinition {
   readonly system: string;
 }
 
-export const READ_ONLY: readonly PermissionRule[] = [
+/**
+ * Shell commands that change the working tree or its history. Denying them keeps a reviewing or planning
+ * agent from changing files by accident. It is a short list, not a sandbox: a build or test the agent is
+ * allowed to run can still write files.
+ */
+export const NO_MUTATING_SHELL: readonly PermissionRule[] = [
+  "rm *",
+  "mv *",
+  "git add *",
+  "git commit *",
+  "git push *",
+  "git reset *",
+  "git checkout *",
+  "git switch *",
+  "git restore *",
+  "git clean *",
+  "git stash *",
+  "git merge *",
+  "git rebase *",
+  "git apply *",
+].map((resource) => ({ action: "shell", resource, effect: "deny" as const }));
+
+/** No edit tools and no delegation. The agent can still read, search, and run non-mutating commands. */
+export const NO_EDITS: readonly PermissionRule[] = [
   { action: "edit", resource: "*", effect: "deny" },
   { action: "subagent", resource: "*", effect: "deny" },
+  ...NO_MUTATING_SHELL,
 ];
 
 export const NO_DELEGATION: readonly PermissionRule[] = [{ action: "subagent", resource: "*", effect: "deny" }];

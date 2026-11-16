@@ -1,9 +1,10 @@
 import { Plugin as Tui } from "@opencode/plugin/tui";
 import { Show, createEffect, createSignal, type Accessor } from "solid-js";
-import { foremanRpc, parseDecision, parseStatus, type Status } from "./rpc.js";
-import { decisionToast, describeDecision, desiredVariant, gateLabel, planSummary, progressBar, statusReport, type AgentModel } from "./tui/format.js";
+import { foremanRpc, parseDecision, parseHealth, parseStatus, type Status } from "./rpc.js";
+import { checkText, decisionToast, describeDecision, desiredVariant, gateLabel, planSummary, progressBar, statusReport, type AgentModel } from "./tui/format.js";
 
 const COMMAND = "foreman.status";
+const CANCEL_COMMAND = "foreman.cancel-check";
 
 export default Tui.define({
   id: "foreman-tui",
@@ -62,14 +63,38 @@ export default Tui.define({
         const sessionID = (event.data as { sessionID?: unknown }).sessionID;
         if (typeof sessionID === "string") refreshKnown(sessionID);
       }),
+      rpc.events.on("session", (event) => {
+        if (!mine(event)) return;
+        const sessionID = (event.data as { sessionID?: unknown }).sessionID;
+        if (typeof sessionID === "string") refreshKnown(sessionID);
+      }),
+      rpc.events.on("health", (event) => {
+        if (!mine(event)) return;
+        const health = parseHealth(event.data);
+        if (health.state === "failing") {
+          context.ui.toast.show({
+            title: "Foreman",
+            message: `The decision model is not answering (${health.detail ?? "unknown error"}). The gates that use it are doing nothing.`,
+            variant: "warning",
+          });
+        } else if (health.state === "ok") {
+          context.ui.toast.show({ title: "Foreman", message: "The decision model is answering again.", variant: "success" });
+        }
+        for (const sessionID of requested) void refresh(sessionID);
+      }),
       rpc.events.on("config", (event) => {
         if (!mine(event)) return;
-        const warnings = (event.data as { warnings?: unknown }).warnings;
+        const { warnings, applied } = event.data as { warnings?: unknown; applied?: unknown };
         const count = Array.isArray(warnings) ? warnings.length : 0;
         context.ui.toast.show({
           title: "Foreman",
-          message: count > 0 ? `Config reloaded with ${count} warning${count === 1 ? "" : "s"}; see the server log.` : "Config reloaded.",
-          variant: count > 0 ? "warning" : "success",
+          message:
+            applied === false
+              ? "A config file could not be read, so the previous settings are still in use. See the server log."
+              : count > 0
+                ? `Config reloaded with ${count} warning${count === 1 ? "" : "s"}; see the server log.`
+                : "Config reloaded.",
+          variant: applied === false || count > 0 ? "warning" : "success",
         });
         for (const sessionID of requested) void refresh(sessionID);
         void loadSettings();
@@ -110,15 +135,28 @@ export default Tui.define({
     };
     cleanups.push(context.ui.slot({ append: "app", render: () => <VariantSync /> }));
 
+    // Drives the elapsed time of a running check; only views showing one read it.
+    const [now, setNow] = createSignal(Date.now());
+    const ticker = setInterval(() => setNow(Date.now()), 1_000);
+    cleanups.push(() => clearInterval(ticker));
+
     const Footer = (props: { sessionID: Accessor<string | undefined> }) => {
-      const summary = () => planSummary(statusOf(props.sessionID()));
+      const status = () => statusOf(props.sessionID());
+      const summary = () => planSummary(status());
+      const check = () => checkText(status(), now());
       return (
-        <Show when={summary()}>
-          <box flexDirection="row" gap={1} flexShrink={0} onMouseUp={() => context.keymap.dispatch(COMMAND)}>
+        <box flexDirection="row" gap={1} flexShrink={0} onMouseUp={() => context.keymap.dispatch(COMMAND)}>
+          <Show when={check()}>
+            <text fg={context.theme.text.feedback.warning.base}>{check()}</text>
+          </Show>
+          <Show when={status()?.paused}>
+            <text fg={context.theme.text.muted}>foreman paused</text>
+          </Show>
+          <Show when={summary()}>
             <text fg={context.theme.text.muted}>plan</text>
             <text fg={context.theme.text.base}>{summary()}</text>
-          </box>
-        </Show>
+          </Show>
+        </box>
       );
     };
 
@@ -126,7 +164,7 @@ export default Tui.define({
       const status = () => statusOf(props.sessionID());
       const last = () => status()?.decisions[0];
       return (
-        <Show when={status()?.plan || last()}>
+        <Show when={status()?.plan || last() || status()?.check || status()?.paused}>
           <box flexDirection="column" onMouseUp={() => context.keymap.dispatch(COMMAND)}>
             <text fg={context.theme.text.base}>
               <b>Foreman</b>
@@ -138,6 +176,12 @@ export default Tui.define({
               <Show when={progressBar(status())}>
                 <text fg={context.theme.text.feedback.success.base}>{progressBar(status())}</text>
               </Show>
+            </Show>
+            <Show when={checkText(status(), now())}>
+              <text fg={context.theme.text.feedback.warning.base}>{checkText(status(), now())}</text>
+            </Show>
+            <Show when={status()?.paused}>
+              <text fg={context.theme.text.muted}>Supervision paused</text>
             </Show>
             <Show when={last()}>
               {(decision) => (
@@ -171,6 +215,21 @@ export default Tui.define({
       await context.ui.dialog.alert({ title: "Foreman", message: statusReport(status, (path) => context.ui.format.path(path)) });
     };
 
+    const cancelCheck = async () => {
+      const route = context.ui.router.current();
+      if (route.type !== "session") return;
+      try {
+        const result = (await rpc.cancelCheck({ sessionID: route.sessionID }, at())) as { cancelled?: unknown };
+        context.ui.toast.show({
+          title: "Foreman",
+          message: result.cancelled === true ? "Stopped the running check." : "No check is running in this session.",
+          variant: "info",
+        });
+      } catch {
+        context.ui.toast.show({ title: "Foreman", message: "The Foreman server plugin did not answer.", variant: "warning" });
+      }
+    };
+
     // Removed by the host when the plugin deactivates.
     context.keymap.layer(() => ({
       mode: "global",
@@ -184,6 +243,17 @@ export default Tui.define({
           slash: { name: "foreman" },
           run: () => {
             void showStatus();
+          },
+        },
+        {
+          id: CANCEL_COMMAND,
+          title: "Foreman: Cancel running check",
+          description: "Stop the project check Foreman is running for this session",
+          group: "Foreman",
+          palette: true,
+          slash: { name: "foreman-cancel-check" },
+          run: () => {
+            void cancelCheck();
           },
         },
       ],

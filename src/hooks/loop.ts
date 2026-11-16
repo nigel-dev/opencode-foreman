@@ -57,23 +57,39 @@ export function repeatingCycle(history: readonly string[], maxRepeats: number): 
   return undefined;
 }
 
+export interface LoopGuard {
+  /** Throws `RepeatedCallError` when the call would continue a repeating pattern. */
+  check(event: ToolCallEvent): void;
+  /** Forgets a session's history. Called when the user sends a new request, so repeats across requests are not counted. */
+  reset(sessionID: string): void;
+}
+
+export type LoopHistories = BoundedMap<string, string[]>;
+
+export function createLoopHistories(): LoopHistories {
+  return new BoundedMap<string, string[]>();
+}
+
 /**
- * Remembers each session's recent tool calls and throws when the same call, or the same short cycle of
- * calls, has repeated more than `maxRepeats` times. Any different call breaks the pattern, so re-running
- * a check after an edit is unaffected.
+ * Remembers each session's tool calls since the last user request and throws when the same call, or the
+ * same short cycle of calls, has repeated more than `maxRepeats` times. Any different call breaks the
+ * pattern, so re-running a check after an edit is unaffected. `histories` is passed in so it outlives a
+ * config change.
  */
-export function createLoopGuard(config: LoopGuardConfig): (event: ToolCallEvent) => void {
-  const histories = new BoundedMap<string, string[]>();
+export function createLoopGuard(config: LoopGuardConfig, histories: LoopHistories = createLoopHistories()): LoopGuard {
   const ignored = new Set(config.ignore);
   const keep = MAX_CYCLE * (config.maxRepeats + 1);
 
-  return (event) => {
-    if (ignored.has(event.tool)) return;
-    const history = histories.get(event.sessionID) ?? [];
-    history.push(fingerprint(event));
-    if (history.length > keep) history.splice(0, history.length - keep);
-    histories.set(event.sessionID, history);
-    const cycle = repeatingCycle(history, config.maxRepeats);
-    if (cycle !== undefined) throw new RepeatedCallError(event.tool, cycle, config.maxRepeats);
+  return {
+    check(event) {
+      if (ignored.has(event.tool)) return;
+      const history = histories.get(event.sessionID) ?? [];
+      history.push(fingerprint(event));
+      if (history.length > keep) history.splice(0, history.length - keep);
+      histories.set(event.sessionID, history);
+      const cycle = repeatingCycle(history, config.maxRepeats);
+      if (cycle !== undefined) throw new RepeatedCallError(event.tool, cycle, config.maxRepeats);
+    },
+    reset: (sessionID) => histories.delete(sessionID),
   };
 }

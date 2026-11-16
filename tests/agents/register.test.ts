@@ -60,10 +60,16 @@ test("with no models configured, bundled agents are registered without a model",
   expect(agents.get("orchestrator")).toMatchObject({ name: "Orchestrator", mode: "primary", hidden: false });
   expect(agents.get("orchestrator")?.model).toBeUndefined();
   expect(agents.get("explore")?.model).toBeUndefined();
-  expect(agents.get("oracle")?.permissions).toEqual([
+  const oracle = agents.get("oracle")?.permissions ?? [];
+  expect(oracle.slice(0, 2)).toEqual([
     { action: "edit", resource: "*", effect: "deny" },
     { action: "subagent", resource: "*", effect: "deny" },
   ]);
+  expect(oracle).toContainEqual({ action: "shell", resource: "git push *", effect: "deny" });
+  // Agents that run a command from a planner or deep session can reach the reviewer for /review-work.
+  for (const id of ["planner", "deep"]) {
+    expect(agents.get(id)?.permissions.at(-1 - (id === "planner" ? 14 : 0))).toEqual({ action: "subagent", resource: "reviewer", effect: "allow" });
+  }
   expect(state.defaultAgent).toBeUndefined();
 });
 

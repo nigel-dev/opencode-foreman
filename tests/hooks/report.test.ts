@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { createReportGate, judgeReport } from "../../src/hooks/report.js";
 import { resolveConfig } from "../../src/lib/config.js";
 import type { Answers } from "../../src/lib/jev.js";
-import { assistant, fakeDecider, noul, user } from "../helpers.js";
+import type { SessionState } from "../../src/lib/state.js";
+import { assistant, fakeDecider, liveOperation, memoryState, noul, user } from "../helpers.js";
 
 const answers = (outcome: number, unfinished: number): Answers => ({ outcome: noul(outcome), unfinished: noul(unfinished) });
 const GOOD = answers(0.9, 0.1);
@@ -16,20 +17,23 @@ test("judgeReport asks for a revision when the report is unfinished or states no
   expect(judgeReport({ outcome: noul(1) }, 0.5)).toEqual({ action: "none", reason: "incomplete answers" });
 });
 
-function harness(decided: Answers | undefined, kind: "root" | "child" | "unknown" = "child") {
+function harness(decided: Answers | undefined, kind: "root" | "child" | "unknown" = "child", sessions: SessionState = memoryState()) {
   const nudges: string[] = [];
   const state = { messages: [user("u1", "Find where retries are implemented"), assistant("I looked around.")] as unknown[] };
   const decider = fakeDecider(decided);
-  const gate = createReportGate({
+  const { operation, cancel } = liveOperation("ses_child");
+  const raw = createReportGate({
     config: resolveConfig({}, {}).reportGate,
     decider,
     sessions: { context: async () => state.messages },
-    lookup: async () => ({ kind, directory: "/repo" }),
+    lookup: async () => ({ kind, parentID: kind === "child" ? "ses_parent" : undefined, directory: "/repo" }),
+    state: sessions,
     nudge: async (_sessionID, text) => {
       nudges.push(text);
     },
   });
-  return { gate, nudges, decider, state };
+  const gate = (event: Parameters<typeof raw>[0]) => raw(event, operation);
+  return { gate, nudges, decider, state, sessions, cancel };
 }
 
 const idle = { sessionID: "ses_child", background: [] };
@@ -54,4 +58,31 @@ test("usable reports, root sessions, unknown sessions, and outages are left alon
   const root = harness(VAGUE, "root");
   await root.gate(idle);
   expect(root.decider.calls).toHaveLength(0);
+});
+
+test("an empty report is sent back without asking the model", async () => {
+  const h = harness(GOOD);
+  h.state.messages = [user("u1", "Find where retries are implemented"), { type: "assistant", content: [], finish: "stop" }];
+  expect(await h.gate(idle)).toMatchObject({ action: "revise", reason: "no-outcome" });
+  expect(h.decider.calls).toHaveLength(0);
+  expect(h.nudges).toHaveLength(1);
+});
+
+test("the one-revision limit survives a rebuilt gate, and a paused parent pauses its subagents", async () => {
+  const sessions = memoryState();
+  expect((await harness(VAGUE, "child", sessions).gate(idle)).action).toBe("revise");
+  expect(await harness(VAGUE, "child", sessions).gate(idle)).toEqual({ action: "none", reason: "already revised" });
+
+  const paused = memoryState();
+  await paused.update("ses_parent", { paused: true });
+  const h = harness(VAGUE, "child", paused);
+  expect(await h.gate(idle)).toEqual({ action: "none", reason: "paused" });
+  expect(h.decider.calls).toHaveLength(0);
+});
+
+test("a report is not sent back into a subagent that was stopped", async () => {
+  const h = harness(VAGUE);
+  h.cancel();
+  expect(await h.gate(idle)).toEqual({ action: "none", reason: "cancelled" });
+  expect(h.nudges).toHaveLength(0);
 });

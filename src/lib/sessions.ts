@@ -41,34 +41,27 @@ export class BoundedMap<Key, Value> {
 export interface SessionFacts {
   /** `unknown` when the lookup failed, so a gate can stay out of the way. */
   readonly kind: "root" | "child" | "unknown";
+  readonly parentID: string | undefined;
   readonly directory: string | undefined;
 }
 
+/** Looked up fresh each time: a session can move to another directory, and gates run rarely. */
 export function createSessionLookup(reader: Pick<SessionReader, "get">): (sessionID: string) => Promise<SessionFacts> {
-  const known = new BoundedMap<string, SessionFacts>();
   return async (sessionID) => {
-    const cached = known.get(sessionID);
-    if (cached) return cached;
     try {
       const session = await reader.get({ sessionID });
-      const facts: SessionFacts = { kind: session.parentID ? "child" : "root", directory: session.location?.directory };
-      known.set(sessionID, facts);
-      return facts;
+      return { kind: session.parentID ? "child" : "root", parentID: session.parentID, directory: session.location?.directory };
     } catch {
-      return { kind: "unknown", directory: undefined };
+      return { kind: "unknown", parentID: undefined, directory: undefined };
     }
   };
 }
 
-/** Gates act on sessions the user drives. A lookup failure counts as "not root" so a gate stays out of the way. */
-export function createRootCheck(reader: Pick<SessionReader, "get">): (sessionID: string) => Promise<boolean> {
-  const lookup = createSessionLookup(reader);
-  return async (sessionID) => (await lookup(sessionID)).kind === "root";
-}
-
 export interface Turn {
-  readonly userID: string;
-  readonly request: string;
+  /** The latest user message still in the context window; absent once compaction has replaced it. */
+  readonly userID: string | undefined;
+  readonly request: string | undefined;
+  /** The assistant's final text after that message; empty when it said nothing. */
   readonly reply: string;
   readonly failed: boolean;
 }
@@ -86,25 +79,32 @@ function assistantText(message: Record<string, unknown>): string {
     .trim();
 }
 
-/** The latest user request and the assistant's final message after it. */
+/**
+ * The assistant's final message and, when it is still in the window, the user request before it.
+ * `session.context` returns the active window, which starts at the latest compaction, so a long turn
+ * can have assistant messages with no user message in front of them.
+ */
 export function lastTurn(messages: ReadonlyArray<unknown>): Turn | undefined {
   let user: { id: string; text: string } | undefined;
   let reply = "";
   let failed = false;
+  let answered = false;
   for (const message of messages) {
     if (!isRecord(message)) continue;
     if (message.type === "user" && typeof message.id === "string" && typeof message.text === "string") {
       user = { id: message.id, text: message.text };
       reply = "";
       failed = false;
-    } else if (message.type === "assistant" && user) {
+      answered = false;
+    } else if (message.type === "assistant") {
+      answered = true;
       const body = assistantText(message);
       if (body) reply = body;
       failed = message.finish === "error" || message.error !== undefined;
     }
   }
-  if (!user || !reply) return undefined;
-  return { userID: user.id, request: user.text, reply, failed };
+  if (!answered) return undefined;
+  return { userID: user?.id, request: user?.text, reply, failed };
 }
 
 export function head(value: string, limit: number): string {
