@@ -49,6 +49,7 @@ function fakeContext(options: Record<string, unknown>, stored = new Map<string, 
   const commands: string[] = [];
   const registered = new Map<string, Registered>();
   const calls: Array<Record<string, unknown>> = [];
+  const contexts = new Map<string, unknown[]>();
   const pending: Array<Record<string, unknown>> = [];
   let wake = () => {};
   const emitEvent = async (event: Record<string, unknown>) => {
@@ -98,7 +99,7 @@ function fakeContext(options: Record<string, unknown>, stored = new Map<string, 
     session: {
       hook,
       get: async () => ({}),
-      context: async () => [],
+      context: async ({ sessionID }: { sessionID: string }) => contexts.get(sessionID) ?? [],
       synthetic: async () => ({}),
       prompt: async (input: unknown) => void calls.push({ prompt: input }),
       switchAgent: async (input: unknown) => void calls.push({ switchAgent: input }),
@@ -146,7 +147,7 @@ function fakeContext(options: Record<string, unknown>, stored = new Map<string, 
       remove: async (key: string) => void stored.delete(key),
     },
   } as unknown as Setup;
-  return { ctx, hooks, agents, state, commands, rpc, registered, calls, stored, emitEvent };
+  return { ctx, hooks, agents, state, commands, rpc, registered, calls, stored, emitEvent, contexts };
 }
 
 // Hooks are always registered and consult the current config when they fire, so a config change needs no re-registration.
@@ -403,4 +404,61 @@ test("a config file that cannot be parsed keeps the settings already in use", as
   // Without the file the default would turn the commands back on.
   expect(commands).toEqual([]);
   cleanup?.();
+});
+
+const HERE = () => ({ directory: join(root, "project") });
+const queued = (sessionID: string, inboxID: string, text: string) => ({
+  type: "session.inbox.enqueued",
+  location: HERE(),
+  data: { sessionID, inboxID, item: { type: "user", payload: { text }, delivery: "steer" } },
+});
+const delivered = (sessionID: string, inboxID: string) => ({ type: "session.inbox.delivered", location: HERE(), data: { sessionID, inboxID } });
+
+test("the newest request is the one stored, even when an earlier write finishes late", async () => {
+  const { ctx, stored, emitEvent } = fakeContext({});
+  const set = ctx.storage.set.bind(ctx.storage);
+  let releaseFirst = () => {};
+  let held = false;
+  (ctx.storage as { set: unknown }).set = async (key: string, value: never) => {
+    if (key === "session/ses_1/request" && !held) {
+      held = true;
+      await new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+    }
+    return set(key, value);
+  };
+  const cleanup = await plugin.setup(ctx);
+  await emitEvent(queued("ses_1", "m1", "first"));
+  await emitEvent(delivered("ses_1", "m1"));
+  await emitEvent(queued("ses_1", "m2", "second"));
+  await emitEvent(delivered("ses_1", "m2"));
+  releaseFirst();
+  for (let turn = 0; turn < 50; turn++) await Promise.resolve();
+  expect(stored.get("session/ses_1/request")).toEqual({ id: "m2", text: "second" });
+  cleanup?.();
+});
+
+test("a request queued before a plugin reload is recovered from the session when it is delivered", async () => {
+  const first = fakeContext({});
+  const cleanupFirst = await plugin.setup(first.ctx);
+  await first.emitEvent(queued("ses_1", "m1", "first"));
+  await first.emitEvent(delivered("ses_1", "m1"));
+  await first.emitEvent(queued("ses_1", "m2", "second"));
+  cleanupFirst?.();
+
+  // The new instance never saw m2 queued.
+  const second = fakeContext({}, first.stored);
+  second.contexts.set("ses_1", [
+    { type: "user", id: "m1", text: "first" },
+    { type: "user", id: "m2", text: "second" },
+    { type: "synthetic", id: "m3", text: "Continue" },
+  ]);
+  const cleanupSecond = await plugin.setup(second.ctx);
+  await second.emitEvent(delivered("ses_1", "m2"));
+  expect(first.stored.get("session/ses_1/request")).toEqual({ id: "m2", text: "second" });
+  // A delivered nudge is not a request.
+  await second.emitEvent(delivered("ses_1", "m3"));
+  expect(first.stored.get("session/ses_1/request")).toEqual({ id: "m2", text: "second" });
+  cleanupSecond?.();
 });

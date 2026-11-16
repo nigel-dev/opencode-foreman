@@ -339,6 +339,16 @@ export default {
     // cancelled here: its check is killed and nothing more is sent into the session.
     const events = new AbortController();
     cleanups.push(() => events.abort());
+    // Storage work started from an event runs in the background, one task at a time per session, so the
+    // newest request always ends up stored and a deletion is not undone by an earlier write finishing late.
+    const background = new Map<string, Promise<void>>();
+    const inOrder = (sessionID: string, task: () => Promise<void>) => {
+      const next = (background.get(sessionID) ?? Promise.resolve()).then(task).catch((error: unknown) => report("session state", error));
+      background.set(sessionID, next);
+      void next.then(() => {
+        if (background.get(sessionID) === next) background.delete(sessionID);
+      });
+    };
     // Requests the session has accepted but not started on yet, by inbox ID.
     const pendingRequests = new BoundedMap<string, string>();
     void (async () => {
@@ -359,16 +369,32 @@ export default {
             pendingRequests.delete(event.data.inboxID);
             break;
           case "session.inbox.delivered": {
+            if (event.location && event.location.directory !== directory) break;
             // Only now is it the request the session is working on. One queued behind a running turn, or
             // cancelled before it started, never replaces the request that turn is answering.
-            const text = pendingRequests.get(event.data.inboxID);
-            if (text === undefined) break;
-            pendingRequests.delete(event.data.inboxID);
-            // A new request makes any verdict still being worked out stale, and starts the loop guard afresh.
-            operations.cancel(sessionID);
-            loopHistories.delete(sessionID);
+            const { inboxID } = event.data;
+            const known = pendingRequests.get(inboxID);
+            pendingRequests.delete(inboxID);
+            const supersede = () => {
+              // A new request makes any verdict still being worked out stale, and starts the loop guard afresh.
+              operations.cancel(sessionID);
+              loopHistories.delete(sessionID);
+            };
             // Recorded so the gates still know the request after compaction drops it from the context window.
-            void state.update(sessionID, { request: { id: event.data.inboxID, text } }).catch((error: unknown) => report("request record", error));
+            const persist = (text: string) => state.update(sessionID, { request: { id: inboxID, text } });
+            if (known !== undefined) {
+              supersede();
+              inOrder(sessionID, () => persist(known));
+            } else {
+              // The plugin was reloaded between the message being queued and delivered, so its text is read
+              // back from the session. Anything that is not a user message (a nudge, say) is ignored.
+              inOrder(sessionID, async () => {
+                const message = (await ctx.session.context({ sessionID })).find((item) => item.id === inboxID);
+                if (message?.type !== "user") return;
+                supersede();
+                await persist(message.text);
+              });
+            }
             break;
           }
           case "session.execution.interrupted":
@@ -377,7 +403,9 @@ export default {
           case "session.deleted":
             operations.cancel(sessionID);
             loopHistories.delete(sessionID);
-            void Promise.all([state.remove(sessionID), storedPlans.clear(sessionID)]).catch((error: unknown) => report("session cleanup", error));
+            inOrder(sessionID, async () => {
+              await Promise.all([state.remove(sessionID), storedPlans.clear(sessionID)]);
+            });
             break;
         }
       }
