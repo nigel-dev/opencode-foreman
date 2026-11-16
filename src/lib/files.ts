@@ -6,22 +6,40 @@ import { parseJsonc } from "./jsonc.js";
 export type RawConfig = Readonly<Record<string, unknown>>;
 
 export interface ConfigSources {
-  /** Merged settings: plugin options, then the global file, then the project file. Later sources win. */
+  /** Merged settings: plugin options, then the global file, then the project file. Later sources win. Only the global file is trusted. */
   readonly raw: RawConfig;
   readonly files: readonly string[];
   readonly warnings: readonly string[];
+  /** A config file exists but could not be read or parsed, so `raw` is missing its settings. */
+  readonly invalid: boolean;
 }
 
-const FILE_NAMES = ["foreman.jsonc", "foreman.json"];
+export const CONFIG_FILE_NAMES = ["foreman.jsonc", "foreman.json"] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// Assigning one of these as a key changes an object's prototype instead of adding a property, which would
+// let a config file smuggle settings past the checks on its own properties.
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+/** A copy holding only ordinary own properties, at every depth. */
+export function plainConfig(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(plainConfig);
+  if (!isRecord(value)) return value;
+  const plain: Record<string, unknown> = {};
+  for (const key of Object.keys(value)) {
+    if (!UNSAFE_KEYS.has(key)) plain[key] = plainConfig(value[key]);
+  }
+  return plain;
 }
 
 /** Objects merge key by key; anything else, arrays included, is replaced by the later source. */
 export function mergeConfig(base: RawConfig, override: RawConfig): RawConfig {
   const merged: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(override)) {
+    if (UNSAFE_KEYS.has(key)) continue;
     const existing = merged[key];
     merged[key] = isRecord(existing) && isRecord(value) ? mergeConfig(existing, value) : value;
   }
@@ -52,8 +70,47 @@ export function globalConfigDir(env: Readonly<Record<string, string | undefined>
   return join(homedir(), ".config", "opencode");
 }
 
+/** The directories a Foreman config file can live in, lowest precedence first. */
+export function configDirectories(
+  projectDirectory: string | undefined,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string[] {
+  return [globalConfigDir(env), ...(projectDirectory ? [join(projectDirectory, ".opencode")] : [])];
+}
+
 function findFile(directory: string): string | undefined {
-  return FILE_NAMES.map((name) => join(directory, name)).find((path) => existsSync(path));
+  return CONFIG_FILE_NAMES.map((name) => join(directory, name)).find((path) => existsSync(path));
+}
+
+/**
+ * Only the user's global Foreman file is trusted. A project file and plugin options can both come from a
+ * repository, so neither may set where the decision-model key is sent, what shell commands are approved
+ * without asking, or which file the log is written to; and neither gets environment variables substituted
+ * into its values, which would let it read a secret into text that is sent to a model.
+ */
+function restrict(config: RawConfig, source: string, warnings: string[]): RawConfig {
+  const restricted: Record<string, unknown> = { ...config };
+  const ignored: string[] = [];
+  if (isRecord(restricted.jev)) {
+    const { url, apiKey, ...jev } = restricted.jev;
+    if (url !== undefined) ignored.push("jev.url");
+    if (apiKey !== undefined) ignored.push("jev.apiKey");
+    restricted.jev = jev;
+  }
+  if (restricted.approval !== undefined) {
+    ignored.push("approval");
+    delete restricted.approval;
+  }
+  if (isRecord(restricted.log) && restricted.log.path !== undefined) {
+    const { path: _path, ...log } = restricted.log;
+    ignored.push("log.path");
+    restricted.log = log;
+  }
+  if (ignored.length > 0) warnings.push(`${source} sets ${ignored.join(", ")}, which only the global Foreman config may set; ignored.`);
+  if (JSON.stringify(restricted).includes("{env:")) {
+    warnings.push(`${source} uses {env:NAME}, which is only resolved in the global Foreman config; left as written.`);
+  }
+  return restricted;
 }
 
 export function loadConfigSources(
@@ -61,23 +118,28 @@ export function loadConfigSources(
   projectDirectory: string | undefined,
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): ConfigSources {
-  const candidates = [findFile(globalConfigDir(env)), projectDirectory && findFile(join(projectDirectory, ".opencode"))];
+  const globalDirectory = globalConfigDir(env);
   const files: string[] = [];
   const warnings: string[] = [];
-  let raw = options;
-  for (const path of candidates) {
+  let raw = restrict(plainConfig(options) as RawConfig, "The plugin options", warnings);
+  let invalid = false;
+  for (const directory of configDirectories(projectDirectory, env)) {
+    const path = findFile(directory);
     if (!path || files.includes(path)) continue;
     try {
-      const parsed = parseJsonc(readFileSync(path, "utf8"));
+      const parsed = plainConfig(parseJsonc(readFileSync(path, "utf8")));
       if (!isRecord(parsed)) {
         warnings.push(`${path} is not a JSON object; ignored.`);
+        invalid = true;
         continue;
       }
-      raw = mergeConfig(raw, parsed);
+      const trusted = directory === globalDirectory;
+      raw = mergeConfig(raw, trusted ? (substituteEnv(parsed, env, warnings) as RawConfig) : restrict(parsed, path, warnings));
       files.push(path);
     } catch (error) {
       warnings.push(`${path} could not be read: ${error instanceof Error ? error.message : String(error)}`);
+      invalid = true;
     }
   }
-  return { raw: substituteEnv(raw, env, warnings) as RawConfig, files, warnings };
+  return { raw, files, warnings, invalid };
 }

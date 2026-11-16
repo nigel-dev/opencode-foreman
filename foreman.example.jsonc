@@ -28,6 +28,10 @@
     // "model": "jev-latest",
   },
 
+  // Commands the done gate runs when an agent says it is finished. Usually set per project,
+  // in <project>/.opencode/foreman.jsonc. A failure is sent back to the agent with its output.
+  // "doneGate": { "checks": ["bun run typecheck", "bun test"] },
+
   // Set to false to skip the bundled agents and use only the gates and model assignment.
   "bundledAgents": true,
 }

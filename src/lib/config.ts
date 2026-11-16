@@ -1,4 +1,5 @@
-import { ROSTER_ROUTES, TIERS, type Tier } from "../agents/index.js";
+import { ROSTER, SOLO_AGENTS, TIERS, rosterRoutes, type Tier } from "../agents/index.js";
+import { defaultLogPath, type LogConfig } from "./log.js";
 import { parseModel, type ModelRef } from "./models.js";
 
 export const INTENTS = ["trivial", "explore", "implement", "plan", "research", "discuss"] as const;
@@ -15,12 +16,35 @@ export interface DoneGateConfig {
   readonly enabled: boolean;
   readonly maxContinuations: number;
   readonly threshold: number;
+  /** Commands run in the session's directory when the assistant claims completion; the first failure is sent back. */
+  readonly checks: readonly string[];
+  readonly checkTimeoutMs: number;
+}
+
+export interface ReportGateConfig {
+  readonly enabled: boolean;
+  readonly threshold: number;
+}
+
+export interface LoopGuardConfig {
+  readonly enabled: boolean;
+  /** Identical consecutive calls allowed before the next one is blocked. */
+  readonly maxRepeats: number;
+  /** Tool names the guard never counts. */
+  readonly ignore: readonly string[];
+}
+
+export interface PlansConfig {
+  /** Inject the session's active plan into each model request and hold the session to its open tasks. */
+  readonly enabled: boolean;
 }
 
 export interface IntentGateConfig {
   readonly enabled: boolean;
   readonly minConfidence: number;
   readonly routes: Readonly<Record<Intent, string>>;
+  /** Agents whose hint omits the suggested handling, because they do the work themselves. */
+  readonly soloAgents: readonly string[];
 }
 
 export interface ApprovalConfig {
@@ -50,6 +74,13 @@ export interface ForemanConfig {
   readonly agents: AgentsConfig;
   readonly jev: JevConfig;
   readonly doneGate: DoneGateConfig;
+  readonly reportGate: ReportGateConfig;
+  readonly loopGuard: LoopGuardConfig;
+  readonly plans: PlansConfig;
+  readonly commands: boolean;
+  /** Let the TUI part set the prompt's variant to the selected agent's configured one when the model changes. */
+  readonly syncVariants: boolean;
+  readonly log: LogConfig;
   readonly intentGate: IntentGateConfig;
   readonly approval: ApprovalConfig;
 }
@@ -140,6 +171,12 @@ function resolveAgents(options: Source, warnings: string[]): AgentsConfig {
   };
 }
 
+/** Whether a bundled agent (or OpenCode's `explore`, which the roster relies on) is registered and not disabled. */
+export function bundledAgentAvailable(agents: AgentsConfig, id: string): boolean {
+  if (agents.overrides[id]?.disabled) return false;
+  return id === "explore" || (agents.bundled && ROSTER.some((agent) => agent.id === id));
+}
+
 export function resolveConfig(
   options: Source = {},
   env: Readonly<Record<string, string | undefined>> = process.env,
@@ -148,11 +185,15 @@ export function resolveConfig(
   const jev = section(options.jev);
   const doneGate = section(options.doneGate);
   const intentGate = section(options.intentGate);
+  const reportGate = section(options.reportGate);
+  const loopGuard = section(options.loopGuard);
+  const plans = section(options.plans);
+  const log = section(options.log);
   const approval = section(options.approval);
   const routes = section(intentGate.routes);
   const apiKey = text(jev.apiKey, text(env.FOREMAN_JEV_API_KEY, ""));
   const agents = resolveAgents(options, warnings);
-  const defaultRoutes = agents.bundled ? ROSTER_ROUTES : DEFAULT_ROUTES;
+  const defaultRoutes = agents.bundled ? rosterRoutes((agent) => bundledAgentAvailable(agents, agent), DEFAULT_ROUTES) : DEFAULT_ROUTES;
 
   return {
     agents,
@@ -166,6 +207,25 @@ export function resolveConfig(
       enabled: flag(doneGate.enabled, true),
       maxContinuations: Math.floor(bounded(doneGate.maxContinuations, 2, 0, 10)),
       threshold: bounded(doneGate.threshold, 0.5, 0, 1),
+      checks: list(doneGate.checks, []),
+      checkTimeoutMs: bounded(doneGate.checkTimeoutMs, 120_000, 1_000, 900_000),
+    },
+    reportGate: {
+      enabled: flag(reportGate.enabled, true),
+      threshold: bounded(reportGate.threshold, 0.5, 0, 1),
+    },
+    loopGuard: {
+      enabled: flag(loopGuard.enabled, true),
+      maxRepeats: Math.floor(bounded(loopGuard.maxRepeats, 4, 1, 100)),
+      ignore: list(loopGuard.ignore, []),
+    },
+    plans: { enabled: flag(plans.enabled, true) },
+    commands: flag(options.commands, true),
+    syncVariants: flag(section(options.tui).syncVariants, true),
+    log: {
+      enabled: flag(log.enabled, true),
+      path: text(log.path, defaultLogPath(env)),
+      maxBytes: bounded(log.maxBytes, 5_000_000, 10_000, 1_000_000_000),
     },
     intentGate: {
       enabled: flag(intentGate.enabled, true),
@@ -173,6 +233,7 @@ export function resolveConfig(
       routes: Object.fromEntries(
         INTENTS.map((intent) => [intent, text(routes[intent], defaultRoutes[intent])]),
       ) as Record<Intent, string>,
+      soloAgents: agents.bundled ? SOLO_AGENTS : [],
     },
     approval: {
       enabled: flag(approval.enabled, false),

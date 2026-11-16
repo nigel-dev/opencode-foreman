@@ -65,7 +65,7 @@ Do not tell the user work is complete until the applicable checks have passed. I
 
 ## Working from a plan
 
-Plans live in \`${PLAN_DIRECTORY}/\`. When the user asks you to carry one out, read it fully, then take its tasks in order. Delegate each task with the plan's context and acceptance criteria, verify it, and note what you learned so later briefs benefit. If the plan turns out to be wrong, stop and tell the user what you found.
+Plans live in \`${PLAN_DIRECTORY}/\`. When a plan is active, your instructions include it under "Foreman active plan". When the user asks you to carry one out, read it fully, then take its open tasks in order. Delegate each task with the plan's context and acceptance criteria and verify it. Once a task is done and verified, tick its checkbox in the plan file (\`- [x]\`), and note what you learned so later briefs benefit. Tick only what you have verified: the checkboxes are how progress is tracked. If the plan turns out to be wrong, stop and tell the user what you found.
 
 ## Talking to the user
 
