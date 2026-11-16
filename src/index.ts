@@ -310,13 +310,6 @@ export default {
     });
 
     await ctx.session.hook("prompt", async (event) => {
-      // A new request makes any verdict still being worked out stale, and starts the loop guard afresh.
-      operations.cancel(event.sessionID);
-      loopHistories.delete(event.sessionID);
-      // Recorded so the gates still know the request after compaction drops it from the context window.
-      await state
-        .update(event.sessionID, { request: { id: event.messageID, text: event.prompt.text } })
-        .catch((error: unknown) => report("request record", error));
       const gate = runtime.intentGate;
       if (!gate) return;
       await withTrace(() => gate.onPrompt(event))
@@ -347,8 +340,22 @@ export default {
     const events = new AbortController();
     cleanups.push(() => events.abort());
     void (async () => {
-      for await (const event of ctx.event.subscribe({ types: ["session.execution.interrupted", "session.deleted"], signal: events.signal })) {
+      const types = ["session.execution.interrupted", "session.inbox.enqueued", "session.deleted"] as const;
+      for await (const event of ctx.event.subscribe({ types: [...types], signal: events.signal })) {
         const { sessionID } = event.data;
+        if (event.type === "session.inbox.enqueued") {
+          // Only a user request the session has actually accepted counts; the prompt hook also runs for
+          // submissions that are later rejected. Other locations' sessions belong to their own instance.
+          if (event.data.item.type !== "user" || (event.location && event.location.directory !== directory)) continue;
+          // A new request makes any verdict still being worked out stale, and starts the loop guard afresh.
+          operations.cancel(sessionID);
+          loopHistories.delete(sessionID);
+          // Recorded so the gates still know the request after compaction drops it from the context window.
+          await state
+            .update(sessionID, { request: { id: event.data.inboxID, text: event.data.item.payload.text } })
+            .catch((error: unknown) => report("request record", error));
+          continue;
+        }
         operations.cancel(sessionID);
         if (event.type === "session.deleted") {
           loopHistories.delete(sessionID);
@@ -376,6 +383,7 @@ export default {
       log = createDecisionLog(config.log);
       // Both transforms read the current runtime, so replaying them applies the new agents and commands.
       await ctx.agent.reload();
+      if (disposed) return;
       await ctx.command.reload();
       if (disposed) return;
       scheduleModelCheck();

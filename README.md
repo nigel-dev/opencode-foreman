@@ -118,11 +118,11 @@ Foreman watches both locations and applies a change within a second of the file 
 
 Settings merge in this order, later wins: plugin `options` in `opencode.json`, the global file, the project file.
 
-A project file is treated as less trusted than your own config. It cannot set `jev.url` or `jev.apiKey` (where your decision-model key is sent), anything under `approval` (which shell commands run without asking), or `log.path`. Those are ignored with a warning in the server log.
+Only the global Foreman file is trusted. A project file and plugin `options` can both come from a repository, so neither can set `jev.url` or `jev.apiKey` (where your decision-model key is sent), anything under `approval` (which shell commands run without asking), or `log.path`. Those are ignored with a warning in the server log. Put them in the global file, or use the `FOREMAN_JEV_*` environment variables.
 
 If a config file cannot be parsed, for example while you are halfway through an edit, Foreman keeps the settings already in use until the file is valid again. The gate options below can go in the same files.
 
-Any string value can reference an environment variable with `{env:NAME}`. An unset variable resolves to an empty string and is reported in the server log.
+In the global file, any string value can reference an environment variable with `{env:NAME}`. An unset variable resolves to an empty string and is reported in the server log. References in a project file or in plugin options are left as written, so a repository cannot read one of your secrets into text that is sent to a model.
 
 ## Plans and commands
 
@@ -196,7 +196,7 @@ By default the done gate only reads what the agent says. Give it commands and it
 
 When the agent says requested work is complete, Foreman runs the commands in order in the session's directory and stops at the first failure. A failure is sent back to the agent with the last 6,000 characters of output. If they all pass, the session goes idle, whatever the agent did or did not say about checking.
 
-Pressing Stop, sending a new message, or running `/foreman-cancel-check` kills a running check and everything it started, and nothing is sent to the agent afterwards. A check that passes its timeout is killed the same way.
+Pressing Stop, sending a new message, or running `/foreman-cancel-check` kills a running check together with the processes it started, and nothing is sent to the agent afterwards. A check that passes its timeout is killed the same way. A process that deliberately detaches itself into its own process group or session is not tracked and keeps running.
 
 The commands run through the shell with your permissions, each time an agent claims completion, so keep them fast and free of side effects. A project config file can set them, so treat a `.opencode/foreman.jsonc` in a repository you do not trust like any other script in it.
 
@@ -223,41 +223,34 @@ The same settings can go in a Foreman config file. Use `{env:NAME}` to keep the 
 }
 ```
 
-Options and config files win over the `FOREMAN_JEV_*` environment variables. Set environment variables on the background service with `opencode service set env NAME value`.
+The global config file wins over the `FOREMAN_JEV_*` environment variables. Set environment variables on the background service with `opencode service set env NAME value`.
 
 To route through a LiteLLM proxy, point the URL at its System One path and use the proxy's model name, for example `http://127.0.0.1:4000/v1/systemone` and `typesafe/jev-1.14.0`.
 
-All options, with their defaults:
+All settings, with their defaults, as they would appear in the global `~/.config/opencode/foreman.jsonc`:
 
 ```jsonc
 {
-  "plugins": [
-    {
-      "package": "@nigel-dev/opencode-foreman",
-      "options": {
-        "jev": { "timeoutMs": 3000 },
-        "doneGate": { "enabled": true, "maxContinuations": 2, "threshold": 0.5, "checks": [], "checkTimeoutMs": 120000 },
-        "reportGate": { "enabled": true, "threshold": 0.5 },
-        "loopGuard": { "enabled": true, "maxRepeats": 4, "ignore": [] },
-        "plans": { "enabled": true },
-        "commands": true,
-        "tui": { "syncVariants": true },
-        "log": { "enabled": true, "maxBytes": 5000000 },
-        "intentGate": {
-          "enabled": true,
-          "minConfidence": 0.5,
-          // Override the suggested handling per intent to name your own agents.
-          "routes": { "implement": "Delegate to worker-deep, then verify." }
-        },
-        "approval": {
-          "enabled": false,
-          "dryRun": true,
-          "riskThreshold": 0.2,
-          "prefixes": ["git status", "git diff", "bun test"]
-        }
-      }
-    }
-  ]
+  "jev": { "timeoutMs": 3000 },
+  "doneGate": { "enabled": true, "maxContinuations": 2, "threshold": 0.5, "checks": [], "checkTimeoutMs": 120000 },
+  "reportGate": { "enabled": true, "threshold": 0.5 },
+  "loopGuard": { "enabled": true, "maxRepeats": 4, "ignore": [] },
+  "plans": { "enabled": true },
+  "commands": true,
+  "tui": { "syncVariants": true },
+  "log": { "enabled": true, "maxBytes": 5000000 },
+  "intentGate": {
+    "enabled": true,
+    "minConfidence": 0.5,
+    // Override the suggested handling per intent to name your own agents.
+    "routes": { "implement": "Delegate to worker-deep, then verify." }
+  },
+  "approval": {
+    "enabled": false,
+    "dryRun": true,
+    "riskThreshold": 0.2,
+    "prefixes": ["git status", "git diff", "bun test"]
+  }
 }
 ```
 

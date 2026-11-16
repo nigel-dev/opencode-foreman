@@ -86,3 +86,20 @@ test("a report is not sent back into a subagent that was stopped", async () => {
   expect(await h.gate(idle)).toEqual({ action: "none", reason: "cancelled" });
   expect(h.nudges).toHaveLength(0);
 });
+
+test("a subagent session paused itself, or a parent paused while the model decides, gets no revision", async () => {
+  const own = memoryState();
+  await own.update("ses_child", { paused: true });
+  expect(await harness(VAGUE, "child", own).gate(idle)).toEqual({ action: "none", reason: "paused" });
+
+  const sessions = memoryState();
+  const h = harness(VAGUE, "child", sessions);
+  const ask = h.decider.ask.bind(h.decider);
+  h.decider.ask = async (state, questions) => {
+    await sessions.update("ses_parent", { paused: true });
+    return ask(state, questions);
+  };
+  expect(await h.gate(idle)).toEqual({ action: "none", reason: "paused" });
+  expect(h.nudges).toHaveLength(0);
+  expect((await sessions.read("ses_child")).revised).toBeUndefined();
+});

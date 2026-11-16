@@ -220,3 +220,19 @@ test("a paused session is left alone without asking the model", async () => {
   expect(decider.calls).toHaveLength(0);
   expect(nudges).toHaveLength(0);
 });
+
+test("a run cancelled while the model decides sends nothing and uses none of the allowance", async () => {
+  const sessions = memoryState();
+  const h = harness(UNFINISHED, { state: sessions, max: 1 });
+  const ask = h.decider.ask.bind(h.decider);
+  h.decider.ask = async (state, questions) => {
+    h.cancel();
+    return ask(state, questions);
+  };
+  expect(await h.gate(idle)).toEqual({ action: "none", reason: "cancelled" });
+  expect(h.nudges).toHaveLength(0);
+  expect((await sessions.read("ses_1")).nudges).toBeUndefined();
+
+  // The next, uncancelled run still has its one continuation.
+  expect((await harness(UNFINISHED, { state: sessions, max: 1 }).gate(idle)).action).toBe("continue");
+});

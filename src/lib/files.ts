@@ -6,7 +6,7 @@ import { parseJsonc } from "./jsonc.js";
 export type RawConfig = Readonly<Record<string, unknown>>;
 
 export interface ConfigSources {
-  /** Merged settings: plugin options, then the global file, then the project file. Later sources win. */
+  /** Merged settings: plugin options, then the global file, then the project file. Later sources win. Only the global file is trusted. */
   readonly raw: RawConfig;
   readonly files: readonly string[];
   readonly warnings: readonly string[];
@@ -67,12 +67,13 @@ function findFile(directory: string): string | undefined {
 }
 
 /**
- * Settings a project file may not set, because a repository is not trusted the way the user's own config
- * is: where the decision-model key is sent, what shell commands are approved without asking, and which
- * file the log is written to.
+ * Only the user's global Foreman file is trusted. A project file and plugin options can both come from a
+ * repository, so neither may set where the decision-model key is sent, what shell commands are approved
+ * without asking, or which file the log is written to; and neither gets environment variables substituted
+ * into its values, which would let it read a secret into text that is sent to a model.
  */
-function restrictProject(config: Record<string, unknown>, path: string, warnings: string[]): Record<string, unknown> {
-  const restricted = { ...config };
+function restrict(config: RawConfig, source: string, warnings: string[]): RawConfig {
+  const restricted: Record<string, unknown> = { ...config };
   const ignored: string[] = [];
   if (isRecord(restricted.jev)) {
     const { url, apiKey, ...jev } = restricted.jev;
@@ -89,7 +90,10 @@ function restrictProject(config: Record<string, unknown>, path: string, warnings
     ignored.push("log.path");
     restricted.log = log;
   }
-  if (ignored.length > 0) warnings.push(`${path} sets ${ignored.join(", ")}, which only the global config may set; ignored.`);
+  if (ignored.length > 0) warnings.push(`${source} sets ${ignored.join(", ")}, which only the global Foreman config may set; ignored.`);
+  if (JSON.stringify(restricted).includes("{env:")) {
+    warnings.push(`${source} uses {env:NAME}, which is only resolved in the global Foreman config; left as written.`);
+  }
   return restricted;
 }
 
@@ -101,7 +105,7 @@ export function loadConfigSources(
   const globalDirectory = globalConfigDir(env);
   const files: string[] = [];
   const warnings: string[] = [];
-  let raw = options;
+  let raw = restrict(options, "The plugin options", warnings);
   let invalid = false;
   for (const directory of configDirectories(projectDirectory, env)) {
     const path = findFile(directory);
@@ -113,12 +117,13 @@ export function loadConfigSources(
         invalid = true;
         continue;
       }
-      raw = mergeConfig(raw, directory === globalDirectory ? parsed : restrictProject(parsed, path, warnings));
+      const trusted = directory === globalDirectory;
+      raw = mergeConfig(raw, trusted ? (substituteEnv(parsed, env, warnings) as RawConfig) : restrict(parsed, path, warnings));
       files.push(path);
     } catch (error) {
       warnings.push(`${path} could not be read: ${error instanceof Error ? error.message : String(error)}`);
       invalid = true;
     }
   }
-  return { raw: substituteEnv(raw, env, warnings) as RawConfig, files, warnings, invalid };
+  return { raw, files, warnings, invalid };
 }

@@ -160,9 +160,11 @@ export function createDoneGate(deps: DoneGateDeps): (event: IdleEvent, operation
         return { action: "exhausted", reason: verdict.reason, ...(verdict.detail ? { detail: verdict.detail } : {}) };
       }
       // The user stopped the session or sent something new while this ran; nothing more may be put into it.
+      // Checked immediately before sending, with nothing awaited in between. A cancelled run sends nothing
+      // and uses none of the allowance.
       if (!operation.live()) return CANCELLED;
-      await deps.state.update(sessionID, { nudges: { requestID: identity.requestID, count: used + 1 } });
       await deps.nudge(sessionID, verdict.text);
+      await deps.state.update(sessionID, { nudges: { requestID: identity.requestID, count: used + 1 } });
       return verdict;
     };
 

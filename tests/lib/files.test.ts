@@ -60,16 +60,38 @@ test("an unreadable or non-object file is reported and skipped", () => {
   expect(sources.warnings).toHaveLength(2);
 });
 
-test("{env:NAME} references are resolved in files and options, and unset ones are reported", () => {
+test("{env:NAME} is resolved only in the global file, and unset variables are reported", () => {
   const env = { OPENCODE_CONFIG_DIR: join(root, "global"), JEV_KEY: "secret", HOST: "127.0.0.1" };
-  writeFileSync(join(root, "global", "foreman.jsonc"), `{ "jev": { "apiKey": "{env:JEV_KEY}", "url": "http://{env:HOST}:4000/v1/systemone" } }`);
-  const sources = loadConfigSources({ jev: { model: "{env:MISSING}" }, approval: { prefixes: ["{env:HOST}"] } }, undefined, env);
-  expect(sources.raw).toEqual({
-    jev: { apiKey: "secret", url: "http://127.0.0.1:4000/v1/systemone", model: "" },
-    approval: { prefixes: ["127.0.0.1"] },
-  });
+  writeFileSync(
+    join(root, "global", "foreman.jsonc"),
+    `{ "jev": { "apiKey": "{env:JEV_KEY}", "url": "http://{env:HOST}:4000/v1/systemone", "model": "{env:MISSING}" } }`,
+  );
+  const sources = loadConfigSources({}, undefined, env);
+  expect(sources.raw).toEqual({ jev: { apiKey: "secret", url: "http://127.0.0.1:4000/v1/systemone", model: "" } });
   expect(sources.warnings).toEqual(["{env:MISSING} is referenced in the Foreman config but MISSING is not set."]);
   expect(substituteEnv(5, env, [])).toBe(5);
+});
+
+test("a project file and plugin options cannot read environment variables into their values", () => {
+  const env = { OPENCODE_CONFIG_DIR: join(root, "global"), FOREMAN_JEV_API_KEY: "secret" };
+  const leak = { intentGate: { routes: { implement: "Routing note: {env:FOREMAN_JEV_API_KEY}" } } };
+  writeFileSync(join(root, "project", ".opencode", "foreman.json"), JSON.stringify(leak));
+  const sources = loadConfigSources({ doneGate: { checks: ["echo {env:FOREMAN_JEV_API_KEY}"] } }, join(root, "project"), env);
+  expect(JSON.stringify(sources.raw)).not.toContain("secret");
+  expect(sources.raw).toMatchObject(leak);
+  expect(sources.warnings).toHaveLength(2);
+  expect(sources.warnings.every((warning) => warning.includes("only resolved in the global Foreman config"))).toBe(true);
+});
+
+test("plugin options are restricted the same way as a project file", () => {
+  const env = { OPENCODE_CONFIG_DIR: join(root, "global") };
+  const sources = loadConfigSources(
+    { jev: { url: "https://elsewhere.example/collect", apiKey: "x", timeoutMs: 500 }, approval: { enabled: true, dryRun: false }, log: { path: "/tmp/x" }, commands: false },
+    undefined,
+    env,
+  );
+  expect(sources.raw).toEqual({ jev: { timeoutMs: 500 }, log: {}, commands: false });
+  expect(sources.warnings[0]).toContain("The plugin options sets jev.url, jev.apiKey, approval, log.path");
 });
 
 test("parseModel splits provider, model, and variant, and rejects malformed values", () => {

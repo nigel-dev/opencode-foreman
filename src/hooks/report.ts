@@ -60,8 +60,9 @@ export function createReportGate(deps: ReportGateDeps): (event: IdleEvent, opera
     if (event.background.some((job) => job.sessionID === sessionID)) return { action: "none", reason: "background work running" };
     const facts = await deps.lookup(sessionID);
     if (facts.kind !== "child") return { action: "none", reason: "not a subagent session" };
-    // Pausing a session pauses the subagents it launched.
-    if (facts.parentID && (await deps.state.read(facts.parentID)).paused) return { action: "none", reason: "paused" };
+    // Pausing a session pauses the subagents it launched; a subagent session can also be paused itself.
+    const paused = async () => (await deps.state.read(sessionID)).paused === true || (facts.parentID !== undefined && (await deps.state.read(facts.parentID)).paused === true);
+    if (await paused()) return { action: "none", reason: "paused" };
 
     const record = await deps.state.read(sessionID);
     const turn = lastTurn(await deps.sessions.context({ sessionID }));
@@ -82,9 +83,12 @@ export function createReportGate(deps: ReportGateDeps): (event: IdleEvent, opera
     }
 
     if (verdict.action === "revise") {
+      // The parent may have been paused while the model was deciding.
+      if (await paused()) return { action: "none", reason: "paused" };
+      // Checked immediately before sending, with nothing awaited in between.
       if (!operation.live()) return CANCELLED;
-      await deps.state.update(sessionID, { revised: identity.requestID });
       await deps.nudge(sessionID, verdict.text);
+      await deps.state.update(sessionID, { revised: identity.requestID });
     }
     return verdict;
   };

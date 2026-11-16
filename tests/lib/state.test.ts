@@ -62,3 +62,17 @@ test("operations cancel per session, supersede an earlier run, and cancel everyt
   expect(operations.cancel("ses_3")).toBe(false);
   expect(finished.live()).toBe(true);
 });
+
+test("updates from two instances to different fields of one session never overwrite each other", async () => {
+  // A storage whose reads and writes interleave: every operation yields first.
+  const data = new Map<string, unknown>();
+  const slow = {
+    get: async (key: string) => (await Promise.resolve(), data.get(key)),
+    set: async (key: string, value: unknown) => (await Promise.resolve(), void data.set(key, value)),
+    remove: async (key: string) => (await Promise.resolve(), void data.delete(key)),
+  };
+  const here = createSessionState(slow);
+  const there = createSessionState(slow);
+  await Promise.all([here.update("ses_1", { paused: true }), there.update("ses_1", { nudges: { requestID: "u1", count: 1 } }), here.update("ses_1", { revised: "u1" })]);
+  expect(await here.read("ses_1")).toEqual({ paused: true, nudges: { requestID: "u1", count: 1 }, revised: "u1" });
+});

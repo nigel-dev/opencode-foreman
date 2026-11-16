@@ -44,12 +44,19 @@ interface Registered {
   execute(input: { sessionID: string; prompt: Record<string, unknown>; delivery: string }): Promise<void>;
 }
 
-function fakeContext(options: Record<string, unknown>) {
+function fakeContext(options: Record<string, unknown>, stored = new Map<string, unknown>()) {
   const hooks: string[] = [];
   const commands: string[] = [];
   const registered = new Map<string, Registered>();
   const calls: Array<Record<string, unknown>> = [];
-  const stored = new Map<string, unknown>();
+  const pending: Array<Record<string, unknown>> = [];
+  let wake = () => {};
+  const emitEvent = async (event: Record<string, unknown>) => {
+    pending.push(event);
+    wake();
+    // Let the plugin's subscription loop take the event and finish handling it.
+    for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+  };
   const replay = { agents: () => {}, commands: () => {} };
   const rpc: { status: (input: unknown) => Promise<unknown>; events: string[] } = { status: async () => undefined, events: [] };
   const agents = new Map<string, Draft>([["explore", { name: "Explore", mode: "subagent", hidden: false, permissions: [] }]]);
@@ -98,10 +105,19 @@ function fakeContext(options: Record<string, unknown>) {
       switchModel: async (input: unknown) => void calls.push({ switchModel: input }),
     },
     event: {
-      // An event stream that stays open and silent until the plugin unloads.
+      // An event stream the test can push into; it ends when the plugin unloads.
       subscribe: ({ signal }: { signal: AbortSignal }) => ({
         [Symbol.asyncIterator]: () => ({
-          next: () => new Promise<IteratorResult<never>>((resolve) => signal.addEventListener("abort", () => resolve({ done: true, value: undefined }), { once: true })),
+          next: async (): Promise<IteratorResult<Record<string, unknown>>> => {
+            while (pending.length === 0) {
+              if (signal.aborted) return { done: true, value: undefined };
+              await new Promise<void>((resolve) => {
+                wake = resolve;
+                signal.addEventListener("abort", () => resolve(), { once: true });
+              });
+            }
+            return { done: false, value: pending.shift() as Record<string, unknown> };
+          },
         }),
       }),
     },
@@ -130,7 +146,7 @@ function fakeContext(options: Record<string, unknown>) {
       remove: async (key: string) => void stored.delete(key),
     },
   } as unknown as Setup;
-  return { ctx, hooks, agents, state, commands, rpc, registered, calls, stored };
+  return { ctx, hooks, agents, state, commands, rpc, registered, calls, stored, emitEvent };
 }
 
 // Hooks are always registered and consult the current config when they fire, so a config change needs no re-registration.
@@ -171,14 +187,15 @@ test("models come from the global file, then the project file, over plugin optio
 });
 
 test("registers every hook once and reports which gates the config turned on", async () => {
-  const defaults = fakeContext({ jev: { apiKey: "k" } });
+  // The key can only come from the environment or the global Foreman file, never from plugin options.
+  process.env.FOREMAN_JEV_API_KEY = "k";
+  const defaults = fakeContext({ jev: { apiKey: "ignored" } });
   const cleanup = await plugin.setup(defaults.ctx);
   expect(defaults.hooks).toEqual(ALL_HOOKS);
   expect(typeof cleanup).toBe("function");
   cleanup?.();
 
   const none = fakeContext({
-    jev: { apiKey: "k" },
     bundledAgents: false,
     commands: false,
     doneGate: { enabled: false },
@@ -313,6 +330,38 @@ test("/foreman-pause is stored, shown in the status, and survives a plugin reloa
   expect(await first.rpc.status({ sessionID: "ses_1" })).toMatchObject({ paused: true, check: null, health: { state: "off" } });
   expect(await first.rpc.status({ sessionID: "ses_2" })).toMatchObject({ paused: false });
   expect(first.calls).toEqual([]);
+  cleanup?.();
+
+  // A second plugin instance over the same storage, as after OpenCode reloads the plugin.
+  const second = fakeContext({}, first.stored);
+  const cleanupSecond = await plugin.setup(second.ctx);
+  expect(await second.rpc.status({ sessionID: "ses_1" })).toMatchObject({ paused: true });
+  await second.registered.get("foreman-resume")?.execute({ sessionID: "ses_1", prompt: { text: "" }, delivery: "steer" });
+  expect(await second.rpc.status({ sessionID: "ses_1" })).toMatchObject({ paused: false });
+  cleanupSecond?.();
+});
+
+test("a request is recorded when the session accepts it, not when it is merely submitted", async () => {
+  const { ctx, stored, emitEvent } = fakeContext({});
+  const cleanup = await plugin.setup(ctx);
+  const here = { directory: join(root, "project") };
+  const enqueued = (sessionID: string, inboxID: string, item: Record<string, unknown>, location = here) => ({
+    type: "session.inbox.enqueued",
+    location,
+    data: { sessionID, inboxID, item },
+  });
+
+  await emitEvent(enqueued("ses_1", "msg_1", { type: "user", payload: { text: "Add a toggle" }, delivery: "steer" }));
+  expect(stored.get("session/ses_1/request")).toEqual({ id: "msg_1", text: "Add a toggle" });
+
+  // A nudge from a gate and a session in another location do not replace it.
+  await emitEvent(enqueued("ses_1", "msg_2", { type: "synthetic", payload: { text: "Continue" }, delivery: "steer" }));
+  await emitEvent(enqueued("ses_9", "msg_3", { type: "user", payload: { text: "Elsewhere" }, delivery: "steer" }, { directory: "/elsewhere" }));
+  expect(stored.get("session/ses_1/request")).toEqual({ id: "msg_1", text: "Add a toggle" });
+  expect(stored.has("session/ses_9/request")).toBe(false);
+
+  await emitEvent({ type: "session.deleted", location: here, data: { sessionID: "ses_1" } });
+  expect(stored.has("session/ses_1/request")).toBe(false);
   cleanup?.();
 });
 

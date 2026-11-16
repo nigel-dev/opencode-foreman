@@ -20,11 +20,12 @@ export interface StateStorage {
 
 export interface SessionState {
   read(sessionID: string): Promise<SessionRecord>;
-  update(sessionID: string, patch: Partial<SessionRecord>): Promise<SessionRecord>;
+  update(sessionID: string, patch: Partial<SessionRecord>): Promise<void>;
   remove(sessionID: string): Promise<void>;
 }
 
-const key = (sessionID: string) => `session/${sessionID}`;
+const FIELDS = ["request", "nudges", "revised", "paused"] as const;
+const key = (sessionID: string, field: (typeof FIELDS)[number]) => `session/${sessionID}/${field}`;
 const REQUEST_LIMIT = 4_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -45,28 +46,28 @@ export function parseRecord(value: unknown): SessionRecord {
 }
 
 /**
- * Reads storage on every call and keeps nothing in memory: several plugin instances share the storage,
- * and a cache in one would go stale when another writes.
+ * Each field has its own storage key and is written whole, so there is no read-modify-write: two plugin
+ * instances updating different fields of one session cannot overwrite each other. Nothing is cached,
+ * because instances share the storage.
  */
 export function createSessionState(storage: StateStorage): SessionState {
-  // Updates are read-modify-write, so they run one at a time within this instance.
-  let queue: Promise<unknown> = Promise.resolve();
-  const read = async (sessionID: string) => parseRecord(await storage.get(key(sessionID)));
-
   return {
-    read,
-    update(sessionID, patch) {
-      const next = queue.then(async () => {
-        const merged: SessionRecord = { ...(await read(sessionID)), ...patch };
-        const record: SessionRecord = merged.request ? { ...merged, request: { id: merged.request.id, text: head(merged.request.text, REQUEST_LIMIT) } } : merged;
-        const { paused, ...rest } = record;
-        await storage.set(key(sessionID), { ...rest, ...(paused ? { paused: true } : {}) });
-        return record;
-      });
-      queue = next.catch(() => undefined);
-      return next;
+    async read(sessionID) {
+      const [request, nudges, revised, paused] = await Promise.all(FIELDS.map((field) => storage.get(key(sessionID, field))));
+      return parseRecord({ request, nudges, revised: isRecord(revised) ? revised.requestID : undefined, paused: isRecord(paused) ? paused.paused : undefined });
     },
-    remove: (sessionID) => storage.remove(key(sessionID)),
+    async update(sessionID, patch) {
+      const writes: Promise<void>[] = [];
+      if (patch.request) writes.push(storage.set(key(sessionID, "request"), { id: patch.request.id, text: head(patch.request.text, REQUEST_LIMIT) }));
+      if (patch.nudges) writes.push(storage.set(key(sessionID, "nudges"), { ...patch.nudges }));
+      if (patch.revised !== undefined) writes.push(storage.set(key(sessionID, "revised"), { requestID: patch.revised }));
+      if (patch.paused === true) writes.push(storage.set(key(sessionID, "paused"), { paused: true }));
+      if (patch.paused === false) writes.push(storage.remove(key(sessionID, "paused")));
+      await Promise.all(writes);
+    },
+    async remove(sessionID) {
+      await Promise.all(FIELDS.map((field) => storage.remove(key(sessionID, field))));
+    },
   };
 }
 
