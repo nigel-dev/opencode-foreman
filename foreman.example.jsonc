@@ -1,0 +1,26 @@
+// Copy to ~/.config/opencode/foreman.jsonc (all projects) or <project>/.opencode/foreman.jsonc (one project).
+// Every key is optional. Without a "models" section, the bundled agents inherit the session's model.
+{
+  // One model per tier, as "provider/model" or "provider/model#variant".
+  // Every agent in a tier uses that model unless it has its own entry under "agents".
+  "models": {
+    "lead": "anthropic/claude-opus-5-5#high", // orchestrator
+    "reasoning": "anthropic/claude-fable-5-2#high", // planner, plan-consultant, worker-visual
+    "consult": "openai/gpt-6-astra#high", // oracle, plan-reviewer
+    "deep": "openai/gpt-6.1-sol#high", // deep, worker-deep, reviewer
+    "standard": "anthropic/claude-sonnet-5-5#medium", // worker, tester, writer
+    "fast": "anthropic/claude-haiku-5-5#low", // worker-quick, librarian, and OpenCode's explore
+  },
+
+  // Per-agent settings, keyed by agent ID. Works for any agent, including ones Foreman does not ship.
+  "agents": {
+    "plan-reviewer": { "model": "openai/gpt-6-astra#xhigh" },
+    // "writer": { "disabled": true },
+  },
+
+  // Agent selected for new sessions. Leave unset to keep OpenCode's default.
+  "defaultAgent": "orchestrator",
+
+  // Set to false to skip the bundled agents and use only the gates and model assignment.
+  "bundledAgents": true,
+}
