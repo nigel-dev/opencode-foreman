@@ -346,10 +346,8 @@ export default {
         const message = (await ctx.session.context({ sessionID })).find((item) => item.id === inboxID);
         return message?.type === "user" ? message.text : undefined;
       },
-      supersede: (sessionID) => {
-        operations.cancel(sessionID);
-        loopHistories.delete(sessionID);
-      },
+      cancelStale: (sessionID) => void operations.cancel(sessionID),
+      startRequest: (sessionID) => loopHistories.delete(sessionID),
       persist: (sessionID, request) => state.update(sessionID, { request }),
       report: reportState,
     });

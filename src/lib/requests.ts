@@ -21,8 +21,14 @@ export function inOrder(sessionID: string, task: () => Promise<void>, report: (e
 export interface RequestTrackerDeps {
   /** The text of a delivered message, read back from the session; undefined unless it is a user message. */
   userText(sessionID: string, inboxID: string): Promise<string | undefined>;
-  /** A new request makes any verdict still being worked out stale, and starts the loop guard afresh. */
-  supersede(sessionID: string): void;
+  /**
+   * Cancels the gate run in progress for a session. Called the moment anything is delivered, never later:
+   * the session is starting a new turn, so a verdict on the previous one is stale, and a gate run that
+   * starts after this point belongs to the new turn and must be left alone.
+   */
+  cancelStale(sessionID: string): void;
+  /** A new request starts the loop guard afresh. */
+  startRequest(sessionID: string): void;
   /** Recorded so the gates still know the request after compaction drops it from the context window. */
   persist(sessionID: string, request: { id: string; text: string }): Promise<void>;
   report(error: unknown): void;
@@ -58,8 +64,9 @@ export function createRequestTracker(deps: RequestTrackerDeps): RequestTracker {
       deliveries.set(sessionID, delivery);
       const known = pending.get(inboxID);
       pending.delete(inboxID);
+      deps.cancelStale(sessionID);
       if (known !== undefined) {
-        deps.supersede(sessionID);
+        deps.startRequest(sessionID);
         inOrder(sessionID, () => deps.persist(sessionID, { id: inboxID, text: known }), deps.report);
         return;
       }
@@ -70,9 +77,9 @@ export function createRequestTracker(deps: RequestTrackerDeps): RequestTracker {
         async () => {
           const text = await deps.userText(sessionID, inboxID);
           if (text === undefined) return;
-          // If the session has started on something newer while this was being read, the work now in
-          // progress belongs to that, and must not be cancelled on behalf of this older request.
-          if (deliveries.get(sessionID) === delivery) deps.supersede(sessionID);
+          // If the session has started on something newer while this was being read, the loop guard's
+          // history belongs to that and is left alone.
+          if (deliveries.get(sessionID) === delivery) deps.startRequest(sessionID);
           await deps.persist(sessionID, { id: inboxID, text });
         },
         deps.report,
