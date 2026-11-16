@@ -15,6 +15,27 @@ export interface DoneGateConfig {
   readonly enabled: boolean;
   readonly maxContinuations: number;
   readonly threshold: number;
+  /** Commands run in the session's directory when the assistant claims completion; the first failure is sent back. */
+  readonly checks: readonly string[];
+  readonly checkTimeoutMs: number;
+}
+
+export interface ReportGateConfig {
+  readonly enabled: boolean;
+  readonly threshold: number;
+}
+
+export interface LoopGuardConfig {
+  readonly enabled: boolean;
+  /** Identical consecutive calls allowed before the next one is blocked. */
+  readonly maxRepeats: number;
+  /** Tool names the guard never counts. */
+  readonly ignore: readonly string[];
+}
+
+export interface PlansConfig {
+  /** Inject the session's active plan into each model request and hold the session to its open tasks. */
+  readonly enabled: boolean;
 }
 
 export interface IntentGateConfig {
@@ -50,6 +71,10 @@ export interface ForemanConfig {
   readonly agents: AgentsConfig;
   readonly jev: JevConfig;
   readonly doneGate: DoneGateConfig;
+  readonly reportGate: ReportGateConfig;
+  readonly loopGuard: LoopGuardConfig;
+  readonly plans: PlansConfig;
+  readonly commands: boolean;
   readonly intentGate: IntentGateConfig;
   readonly approval: ApprovalConfig;
 }
@@ -148,6 +173,9 @@ export function resolveConfig(
   const jev = section(options.jev);
   const doneGate = section(options.doneGate);
   const intentGate = section(options.intentGate);
+  const reportGate = section(options.reportGate);
+  const loopGuard = section(options.loopGuard);
+  const plans = section(options.plans);
   const approval = section(options.approval);
   const routes = section(intentGate.routes);
   const apiKey = text(jev.apiKey, text(env.FOREMAN_JEV_API_KEY, ""));
@@ -166,7 +194,20 @@ export function resolveConfig(
       enabled: flag(doneGate.enabled, true),
       maxContinuations: Math.floor(bounded(doneGate.maxContinuations, 2, 0, 10)),
       threshold: bounded(doneGate.threshold, 0.5, 0, 1),
+      checks: list(doneGate.checks, []),
+      checkTimeoutMs: bounded(doneGate.checkTimeoutMs, 120_000, 1_000, 900_000),
     },
+    reportGate: {
+      enabled: flag(reportGate.enabled, true),
+      threshold: bounded(reportGate.threshold, 0.5, 0, 1),
+    },
+    loopGuard: {
+      enabled: flag(loopGuard.enabled, true),
+      maxRepeats: Math.floor(bounded(loopGuard.maxRepeats, 4, 1, 100)),
+      ignore: list(loopGuard.ignore, []),
+    },
+    plans: { enabled: flag(plans.enabled, true) },
+    commands: flag(options.commands, true),
     intentGate: {
       enabled: flag(intentGate.enabled, true),
       minConfidence: bounded(intentGate.minConfidence, 0.5, 0, 1),

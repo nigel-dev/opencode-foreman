@@ -50,15 +50,20 @@ src/
     orchestrator.ts, planner.ts, deep.ts, workers.ts, specialists.ts
     index.ts            # ROSTER, built-in agent tiers, roster-aware routing hints
     register.ts         # Agent transform: applies definitions, tier models, overrides
+  commands.ts           # Slash commands: /plan, /start-work, /stop-work, /review-work, /handoff
   hooks/                # One file per gate
     done.ts             # session experimental.idle — nudges unfinished or unverified work
     intent.ts           # session prompt + context — classifies requests, injects a routing hint
     approval.ts         # permission evaluate — screens and scores ask-level shell commands
+    report.ts           # session experimental.idle (child sessions) — sends weak subagent reports back once
+    loop.ts             # tool execute.before — blocks identical consecutive tool calls
   lib/                  # Shared internal logic
     config.ts           # Options and environment resolution, defaults
     files.ts            # foreman.json(c) discovery and layered merge
     jsonc.ts            # Comment and trailing-comma stripping
     models.ts           # provider/model#variant parsing
+    checks.ts           # Runs the configured project check commands
+    plans.ts            # Plan lookup, checkbox progress, per-session active plan
     jev.ts              # Decision-model client (System One request and response parsing)
     sessions.ts         # Root-session check, last-turn extraction, bounded per-session state
 tests/                  # Bun test suite, mirroring src/

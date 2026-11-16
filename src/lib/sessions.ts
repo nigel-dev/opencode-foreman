@@ -1,5 +1,8 @@
 export interface SessionReader {
-  get(input: { sessionID: string }): Promise<{ readonly parentID?: string | undefined }>;
+  get(input: { sessionID: string }): Promise<{
+    readonly parentID?: string | undefined;
+    readonly location?: { readonly directory?: string | undefined } | undefined;
+  }>;
   context(input: { sessionID: string }): Promise<ReadonlyArray<unknown>>;
 }
 
@@ -35,20 +38,32 @@ export class BoundedMap<Key, Value> {
   }
 }
 
-/** Gates act on sessions the user drives. A lookup failure counts as "not root" so a gate stays out of the way. */
-export function createRootCheck(reader: Pick<SessionReader, "get">): (sessionID: string) => Promise<boolean> {
-  const known = new BoundedMap<string, boolean>();
+export interface SessionFacts {
+  /** `unknown` when the lookup failed, so a gate can stay out of the way. */
+  readonly kind: "root" | "child" | "unknown";
+  readonly directory: string | undefined;
+}
+
+export function createSessionLookup(reader: Pick<SessionReader, "get">): (sessionID: string) => Promise<SessionFacts> {
+  const known = new BoundedMap<string, SessionFacts>();
   return async (sessionID) => {
     const cached = known.get(sessionID);
-    if (cached !== undefined) return cached;
+    if (cached) return cached;
     try {
-      const root = !(await reader.get({ sessionID })).parentID;
-      known.set(sessionID, root);
-      return root;
+      const session = await reader.get({ sessionID });
+      const facts: SessionFacts = { kind: session.parentID ? "child" : "root", directory: session.location?.directory };
+      known.set(sessionID, facts);
+      return facts;
     } catch {
-      return false;
+      return { kind: "unknown", directory: undefined };
     }
   };
+}
+
+/** Gates act on sessions the user drives. A lookup failure counts as "not root" so a gate stays out of the way. */
+export function createRootCheck(reader: Pick<SessionReader, "get">): (sessionID: string) => Promise<boolean> {
+  const lookup = createSessionLookup(reader);
+  return async (sessionID) => (await lookup(sessionID)).kind === "root";
 }
 
 export interface Turn {

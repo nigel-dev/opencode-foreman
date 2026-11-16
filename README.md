@@ -10,18 +10,21 @@
   <a href="https://github.com/nigel-dev/opencode-foreman/actions/workflows/ci.yml"><img src="https://github.com/nigel-dev/opencode-foreman/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
 </p>
 
-An [OpenCode](https://opencode.ai) V2 plugin that gives you a team of agents and keeps them honest. It does two things:
+An [OpenCode](https://opencode.ai) V2 plugin that gives you a team of agents and keeps them honest. It does three things:
 
 - **Agents.** It registers a roster of primary agents and subagents, and assigns each one a model from a config file.
-- **Gates.** It supervises sessions with a decision model through three gates:
+- **Workflow.** It adds slash commands for planning, executing a plan, reviewing, and handing off, and it tracks the plan a session is carrying out.
+- **Supervision.** It watches sessions through these gates and guards:
 
 | Gate | Hook | What it does | Default |
 | --- | --- | --- | --- |
-| Done gate | `session` `experimental.idle` | When a session is about to go idle, checks whether the final message leaves requested work unfinished or claims completion without a check, and sends a synthetic message telling the agent to continue. | on |
+| Done gate | `session` `experimental.idle` | When a session is about to go idle, checks whether the final message leaves requested work unfinished or claims completion without a check, runs the project checks you configure, and sends a synthetic message telling the agent to continue. | on |
+| Report gate | `session` `experimental.idle` | When a subagent is about to hand back, checks that its report states an outcome and is not half-finished, and sends it back once if not. | on |
+| Loop guard | `tool` `execute.before` | Blocks a tool call that would repeat the previous call exactly for the fifth time in a row. Uses no model. | on |
 | Intent gate | `session` `prompt` + `context` | Classifies each user request (intent, size, ambiguity) and adds an advisory routing hint to the system instructions for that turn. The stored user message is not modified. | on |
 | Approval gate | `permission` `evaluate` | Scores the risk of `ask`-level shell commands that pass a strict lexical filter, and allows the low-risk ones. | off, dry run |
 
-All three gates use [TypeSafe Jev](https://docs.typesafe.ai), a model that returns probabilities for typed questions instead of text. If the model is unreachable or returns something unusable, every gate does nothing, so an outage never blocks a session.
+The done, report, intent, and approval gates use [TypeSafe Jev](https://docs.typesafe.ai), a model that returns probabilities for typed questions instead of text. If the model is unreachable or returns something unusable, those gates do nothing, so an outage never blocks a session. The loop guard, the commands, and plan tracking work without it.
 
 Requires OpenCode 2.3.0 or newer. Two of the hooks are marked experimental by OpenCode and may change.
 
@@ -108,9 +111,48 @@ Each agent belongs to a tier, and you assign a model to each tier in a Foreman c
 
 A tier or agent with no model inherits the session's model, so the plugin works with no config file at all. A model that is not in OpenCode's catalog is reported in the server log a few seconds after startup. See [`foreman.example.jsonc`](foreman.example.jsonc) for a commented starting point.
 
+Foreman reads its config when OpenCode loads a project. After editing a Foreman config file, run `/reload` (or `opencode reload`) to apply it.
+
 Settings merge in this order, later wins: plugin `options` in `opencode.json`, the global file, the project file. The gate options below can go in the same files.
 
 Any string value can reference an environment variable with `{env:NAME}`. An unset variable resolves to an empty string and is reported in the server log.
+
+## Plans and commands
+
+| Command | What it does |
+| --- | --- |
+| `/plan <request>` | Switches the session to `planner` and starts planning the request |
+| `/start-work [name]` | Makes `.foreman/plans/<name>.md` the session's active plan, switches to `orchestrator`, and starts on it. The name can be omitted when there is only one plan |
+| `/stop-work` | Stops tracking the active plan |
+| `/review-work [focus]` | Sends the `reviewer` subagent over the current changes |
+| `/handoff [focus]` | Writes a summary for continuing in a fresh session: goal, state, decisions, files, checks, open issues, next step |
+
+`/plan`, `/start-work`, and `/review-work` are only registered while the bundled agents are.
+
+A plan's tasks are Markdown checkboxes. While a plan is active in a session:
+
+- The plan file is read fresh and added to the system instructions of every model request, so it survives compaction. The first 12,000 characters are included.
+- The orchestrator ticks a task's checkbox once the task is done and verified.
+- The done gate keeps the session going while unticked tasks remain, within `maxContinuations`, and stops tracking the plan once every task is ticked.
+
+The active plan is stored per session in plugin storage and survives a restart. Subagent sessions do not inherit it.
+
+## Project checks
+
+By default the done gate only reads what the agent says. Give it commands and it checks the work instead. Put them in the project's `.opencode/foreman.jsonc`:
+
+```jsonc
+{
+  "doneGate": {
+    "checks": ["bun run typecheck", "bun test"],
+    "checkTimeoutMs": 120000
+  }
+}
+```
+
+When the agent says requested work is complete, Foreman runs the commands in order in the session's directory and stops at the first failure. A failure is sent back to the agent with the last 6,000 characters of output. If they all pass, the session goes idle, whatever the agent did or did not say about checking.
+
+The commands run through the shell with your permissions, each time an agent claims completion, so keep them fast and free of side effects. A project config file can set them, so treat a `.opencode/foreman.jsonc` in a repository you do not trust like any other script in it.
 
 ## Configure the gates
 
@@ -148,7 +190,11 @@ All options, with their defaults:
       "package": "@nigel-dev/opencode-foreman",
       "options": {
         "jev": { "timeoutMs": 3000 },
-        "doneGate": { "enabled": true, "maxContinuations": 2, "threshold": 0.5 },
+        "doneGate": { "enabled": true, "maxContinuations": 2, "threshold": 0.5, "checks": [], "checkTimeoutMs": 120000 },
+        "reportGate": { "enabled": true, "threshold": 0.5 },
+        "loopGuard": { "enabled": true, "maxRepeats": 4, "ignore": [] },
+        "plans": { "enabled": true },
+        "commands": true,
         "intentGate": {
           "enabled": true,
           "minConfidence": 0.5,
@@ -169,9 +215,13 @@ All options, with their defaults:
 
 ## Behaviour
 
-**Scope.** The done and intent gates act only on root sessions, not on subagent child sessions.
+**Scope.** The done and intent gates act only on root sessions. The report gate acts only on subagent child sessions. The loop guard acts on every session.
 
-**Done gate.** It sends the latest user request and the assistant's final message to the model. It does nothing when the request did not ask for a change, when the assistant is waiting on the user, when the turn failed, or while the session's own background work is still running. It sends at most `maxContinuations` nudges per user request.
+**Done gate.** It sends the latest user request and the assistant's final message to the model. It does nothing when the request did not ask for a change, when the assistant is waiting on the user, when the turn failed, or while the session's own background work is still running. It sends at most `maxContinuations` nudges per user request, counting nudges for failed checks and open plan tasks.
+
+**Report gate.** It sends the subagent's brief and its final message to the model, and asks for one revision per brief when the report states no outcome or says the task is half-done. A second weak report goes to the parent as it is.
+
+**Loop guard.** It compares each tool call's name and arguments with the previous call in the same session. After `maxRepeats` identical calls in a row, the next one fails with a message telling the agent to change approach, and keeps failing until the agent makes a different call. Any different call resets the count, so re-running a test after an edit is unaffected. List tools that legitimately repeat, such as a polling tool, in `ignore`.
 
 **Intent gate.** Intents are `trivial`, `explore`, `implement`, `plan`, `research`, and `discuss`. A classification below `minConfidence` produces no hint.
 

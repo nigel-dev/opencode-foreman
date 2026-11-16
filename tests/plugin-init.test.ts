@@ -40,6 +40,7 @@ interface Draft {
 
 function fakeContext(options: Record<string, unknown>) {
   const hooks: string[] = [];
+  const commands: string[] = [];
   const agents = new Map<string, Draft>([["explore", { name: "Explore", mode: "subagent", hidden: false, permissions: [] }]]);
   const state: { defaultAgent?: string | undefined } = {};
   const hook = async (name: string) => {
@@ -65,15 +66,23 @@ function fakeContext(options: Record<string, unknown>) {
     model: { list: async () => [] },
     session: { hook, get: async () => ({}), context: async () => [], synthetic: async () => ({}) },
     permission: { hook },
-    storage: { set: async () => {} },
+    tool: { hook },
+    command: {
+      transform: async (callback: (e: { add(command: { name: string }): void }) => void) => {
+        callback({ add: (command) => void commands.push(command.name) });
+        return { dispose: async () => {} };
+      },
+    },
+    storage: { get: async () => undefined, set: async () => {}, remove: async () => {} },
   } as unknown as Setup;
-  return { ctx, hooks, agents, state };
+  return { ctx, hooks, agents, state, commands };
 }
 
 test("without an API key the agents are registered and the gates are not", async () => {
-  const { ctx, hooks, agents } = fakeContext({});
+  const { ctx, hooks, agents, commands } = fakeContext({});
   const cleanup = await plugin.setup(ctx);
-  expect(hooks).toEqual([]);
+  expect(hooks).toEqual(["execute.before", "context"]);
+  expect(commands).toEqual(["handoff", "stop-work", "plan", "start-work", "review-work"]);
   expect(agents.has("orchestrator")).toBe(true);
   expect(agents.get("orchestrator")?.model).toBeUndefined();
   cleanup?.();
@@ -106,16 +115,26 @@ test("models come from the global file, then the project file, over plugin optio
 test("registers the done and intent gates by default and approval only when enabled", async () => {
   const defaults = fakeContext({ jev: { apiKey: "k" } });
   const cleanup = await plugin.setup(defaults.ctx);
-  expect(defaults.hooks).toEqual(["experimental.idle", "prompt", "context"]);
+  expect(defaults.hooks).toEqual(["execute.before", "context", "experimental.idle", "prompt", "context"]);
   expect(typeof cleanup).toBe("function");
   cleanup?.();
 
   const all = fakeContext({ jev: { apiKey: "k" }, approval: { enabled: true } });
   await plugin.setup(all.ctx);
-  expect(all.hooks).toEqual(["experimental.idle", "prompt", "context", "evaluate"]);
+  expect(all.hooks).toEqual(["execute.before", "context", "experimental.idle", "prompt", "context", "evaluate"]);
 
-  const none = fakeContext({ jev: { apiKey: "k" }, doneGate: { enabled: false }, intentGate: { enabled: false } });
+  const none = fakeContext({
+    jev: { apiKey: "k" },
+    bundledAgents: false,
+    commands: false,
+    doneGate: { enabled: false },
+    reportGate: { enabled: false },
+    intentGate: { enabled: false },
+    loopGuard: { enabled: false },
+    plans: { enabled: false },
+  });
   await plugin.setup(none.ctx);
+  expect(none.commands).toEqual([]);
   expect(none.hooks).toEqual([]);
 });
 
@@ -130,7 +149,7 @@ test("config falls back to defaults for missing or invalid values and reads the 
     model: "typesafe/jev-1.14.0",
     timeoutMs: 3_000,
   });
-  expect(config.doneGate).toEqual({ enabled: true, maxContinuations: 2, threshold: 0.5 });
+  expect(config.doneGate).toEqual({ enabled: true, maxContinuations: 2, threshold: 0.5, checks: [], checkTimeoutMs: 120_000 });
   expect(config.approval).toMatchObject({ enabled: false, dryRun: true, riskThreshold: 0.2, prefixes: ["git status"] });
   expect(resolveConfig({ jev: { apiKey: "option-key" } }, { FOREMAN_JEV_API_KEY: "env-key" }).jev.apiKey).toBe("option-key");
 });

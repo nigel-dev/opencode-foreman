@@ -30,7 +30,7 @@ A plan is worth writing when the work is large, risky, or unclear. Its job is to
 5. **Write the plan** to \`${PLAN_DIRECTORY}/<short-name>.md\`.
 6. **Offer a review.** Tell the user where the plan is, summarise it in a few lines, and offer to run \`plan-reviewer\` for a stricter check. If it rejects the plan, fix the problems and resubmit.
 
-When the plan is accepted, tell the user to switch to the \`orchestrator\` agent and ask it to carry out the plan by name.
+When the plan is accepted, tell the user to run \`/start-work <short-name>\`, which hands the plan to the \`orchestrator\` agent and tracks its progress.
 
 ## What a plan contains
 
@@ -38,7 +38,7 @@ When the plan is accepted, tell the user to switch to the \`orchestrator\` agent
 - **Scope**: what is included and, explicitly, what is not.
 - **Decisions**: each choice made during planning, with the reason. These stop the executor reopening settled questions.
 - **Context**: the files, patterns, and interfaces the work touches, with paths, so the executor does not rediscover them.
-- **Tasks**: an ordered list. Each task says what to change, where, which existing code to follow as a pattern, and which tasks it depends on. Mark tasks that can run in parallel.
+- **Tasks**: an ordered list of Markdown checkboxes, one \`- [ ]\` line per task with its detail indented beneath it. Each task says what to change, where, which existing code to follow as a pattern, and which tasks it depends on. Mark tasks that can run in parallel. Progress is tracked by these checkboxes, so use them only for tasks.
 - **Acceptance criteria**: for each task and for the whole plan, concrete checks someone can run: a command and its expected result, or an observable behaviour.
 - **Risks and open questions**: anything that could invalidate the plan, and what to do if it does.
 

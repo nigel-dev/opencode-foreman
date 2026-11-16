@@ -1,0 +1,57 @@
+import { expect, test } from "bun:test";
+import { createReportGate, judgeReport } from "../../src/hooks/report.js";
+import { resolveConfig } from "../../src/lib/config.js";
+import type { Answers } from "../../src/lib/jev.js";
+import { assistant, fakeDecider, noul, user } from "../helpers.js";
+
+const answers = (outcome: number, unfinished: number): Answers => ({ outcome: noul(outcome), unfinished: noul(unfinished) });
+const GOOD = answers(0.9, 0.1);
+const VAGUE = answers(0.1, 0.1);
+const PARTIAL = answers(0.9, 0.9);
+
+test("judgeReport asks for a revision when the report is unfinished or states no outcome", () => {
+  expect(judgeReport(GOOD, 0.5)).toEqual({ action: "none", reason: "usable report" });
+  expect(judgeReport(VAGUE, 0.5)).toMatchObject({ action: "revise", reason: "no-outcome" });
+  expect(judgeReport(PARTIAL, 0.5)).toMatchObject({ action: "revise", reason: "unfinished" });
+  expect(judgeReport({ outcome: noul(1) }, 0.5)).toEqual({ action: "none", reason: "incomplete answers" });
+});
+
+function harness(decided: Answers | undefined, kind: "root" | "child" | "unknown" = "child") {
+  const nudges: string[] = [];
+  const state = { messages: [user("u1", "Find where retries are implemented"), assistant("I looked around.")] as unknown[] };
+  const decider = fakeDecider(decided);
+  const gate = createReportGate({
+    config: resolveConfig({}, {}).reportGate,
+    decider,
+    sessions: { context: async () => state.messages },
+    lookup: async () => ({ kind, directory: "/repo" }),
+    nudge: async (_sessionID, text) => {
+      nudges.push(text);
+    },
+  });
+  return { gate, nudges, decider, state };
+}
+
+const idle = { sessionID: "ses_child", background: [] };
+
+test("a weak subagent report is sent back once per brief, with the task and report as evidence", async () => {
+  const { gate, nudges, decider, state } = harness(VAGUE);
+  expect(await gate(idle)).toMatchObject({ action: "revise", reason: "no-outcome" });
+  expect(decider.calls[0]?.state).toEqual({ task: "Find where retries are implemented", report: "I looked around." });
+  expect(await gate(idle)).toEqual({ action: "none", reason: "already revised" });
+  expect(nudges).toHaveLength(1);
+
+  state.messages = [...state.messages, user("u2", "Also check the upload path"), assistant("Hmm.")];
+  expect((await gate(idle)).action).toBe("revise");
+  expect(nudges).toHaveLength(2);
+});
+
+test("usable reports, root sessions, unknown sessions, and outages are left alone", async () => {
+  for (const h of [harness(GOOD), harness(VAGUE, "root"), harness(VAGUE, "unknown"), harness(undefined)]) {
+    expect((await h.gate(idle)).action).toBe("none");
+    expect(h.nudges).toHaveLength(0);
+  }
+  const root = harness(VAGUE, "root");
+  await root.gate(idle);
+  expect(root.decider.calls).toHaveLength(0);
+});
