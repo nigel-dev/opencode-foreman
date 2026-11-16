@@ -76,6 +76,8 @@ export interface ForemanConfig {
   readonly loopGuard: LoopGuardConfig;
   readonly plans: PlansConfig;
   readonly commands: boolean;
+  /** Let the TUI part set the prompt's variant to the selected agent's configured one when the model changes. */
+  readonly syncVariants: boolean;
   readonly log: LogConfig;
   readonly intentGate: IntentGateConfig;
   readonly approval: ApprovalConfig;
@@ -211,6 +213,7 @@ export function resolveConfig(
     },
     plans: { enabled: flag(plans.enabled, true) },
     commands: flag(options.commands, true),
+    syncVariants: flag(section(options.tui).syncVariants, true),
     log: {
       enabled: flag(log.enabled, true),
       path: text(log.path, defaultLogPath(env)),

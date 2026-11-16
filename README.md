@@ -149,6 +149,8 @@ The package includes a TUI part, loaded automatically with the server part:
 
 A toast also confirms each config reload.
 
+**Variant sync.** The TUI remembers the last variant you picked for each model and applies it over an agent's configured one. When the prompt's model changes, Foreman's TUI part sets the variant back to the one configured for the agent using that model. A variant you pick afterwards stays until the model changes again. Before a session exists the TUI does not say which agent is selected, so the variant is taken from the primary agents configured with that model, and an agent with no model of its own that inherits the same model gets that variant too. Turn it off with `"tui": { "syncVariants": false }`.
+
 ## Decision log
 
 Every gate decision is appended to a JSON Lines file, one object per line:
@@ -227,6 +229,7 @@ All options, with their defaults:
         "loopGuard": { "enabled": true, "maxRepeats": 4, "ignore": [] },
         "plans": { "enabled": true },
         "commands": true,
+        "tui": { "syncVariants": true },
         "log": { "enabled": true, "maxBytes": 5000000 },
         "intentGate": {
           "enabled": true,

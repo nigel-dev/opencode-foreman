@@ -1,7 +1,7 @@
 import { Plugin as Tui } from "@opencode/plugin/tui";
-import { Show, createSignal, type Accessor } from "solid-js";
+import { Show, createEffect, createSignal, type Accessor } from "solid-js";
 import { foremanRpc, parseDecision, parseStatus, type Status } from "./rpc.js";
-import { decisionToast, describeDecision, gateLabel, planSummary, progressBar, statusReport } from "./tui/format.js";
+import { decisionToast, describeDecision, desiredVariant, gateLabel, planSummary, progressBar, statusReport, type AgentModel } from "./tui/format.js";
 
 const COMMAND = "foreman.status";
 
@@ -72,10 +72,43 @@ export default Tui.define({
           variant: count > 0 ? "warning" : "success",
         });
         for (const sessionID of requested) void refresh(sessionID);
+        void loadSettings();
       }),
       // Ticking a plan checkbox is a file edit, not an event, so progress is re-read whenever a turn ends.
       context.data.on("session.execution.succeeded", (event) => refreshKnown(event.data.sessionID)),
     );
+
+    const [syncVariants, setSyncVariants] = createSignal(false);
+    const loadSettings = async () => {
+      try {
+        setSyncVariants(parseStatus(await rpc.status({}, at()))?.syncVariants ?? false);
+        await context.data.location.agent.sync(context.location);
+      } catch {
+        // Without the server part there is nothing to sync to.
+      }
+    };
+    void loadSettings();
+
+    // The TUI remembers the last variant picked for each model and applies it over an agent's configured
+    // one. When the prompt's model changes, this puts the configured variant back. A variant the user
+    // picks afterwards stays until the model changes again.
+    const VariantSync = () => {
+      let settled: string | undefined;
+      createEffect(() => {
+        const current = context.ui.model.current();
+        const agents = context.data.location.agent.list(context.location) as readonly AgentModel[] | undefined;
+        if (!syncVariants() || !current || !agents || agents.length === 0) return;
+        const route = context.ui.router.current();
+        const sessionAgent = route.type === "session" ? context.data.session.get(route.sessionID)?.agent : undefined;
+        const stamp = `${current.providerID}/${current.modelID}|${sessionAgent ?? ""}`;
+        if (stamp === settled) return;
+        settled = stamp;
+        const wanted = desiredVariant(agents, current, sessionAgent);
+        if (wanted && wanted !== current.variant) context.ui.model.variant.set(wanted);
+      });
+      return null;
+    };
+    cleanups.push(context.ui.slot({ append: "app", render: () => <VariantSync /> }));
 
     const Footer = (props: { sessionID: Accessor<string | undefined> }) => {
       const summary = () => planSummary(statusOf(props.sessionID()));

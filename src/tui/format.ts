@@ -114,3 +114,29 @@ export function statusReport(status: Status, home: (path: string) => string = (p
   if (status.logFile) lines.push(`Log: ${home(status.logFile)}`);
   return lines.join("\n");
 }
+
+export interface AgentModel {
+  readonly id: string;
+  readonly mode: string;
+  readonly hidden?: boolean | undefined;
+  readonly model?: { readonly providerID: string; readonly id: string; readonly variant?: string | undefined } | undefined;
+}
+
+/**
+ * The variant the prompt should use for a model, taken from the agents configured with that model.
+ * The session's own agent decides when it uses the model; otherwise the primary agents must agree,
+ * because the TUI does not say which agent is selected before a session exists.
+ */
+export function desiredVariant(
+  agents: readonly AgentModel[],
+  model: { readonly providerID: string; readonly modelID: string },
+  sessionAgent?: string,
+): string | undefined {
+  const matches = agents.filter(
+    (agent) => agent.model?.variant !== undefined && agent.model.providerID === model.providerID && agent.model.id === model.modelID,
+  );
+  const own = matches.find((agent) => agent.id === sessionAgent);
+  if (own) return own.model?.variant;
+  const variants = new Set(matches.filter((agent) => agent.mode !== "subagent" && !agent.hidden).map((agent) => agent.model?.variant));
+  return variants.size === 1 ? [...variants][0] : undefined;
+}

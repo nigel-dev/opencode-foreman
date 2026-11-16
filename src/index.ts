@@ -79,6 +79,7 @@ export default {
           decisionModel: runtime.decisionModel,
           configFiles,
           logFile: config.log.enabled ? config.log.path : null,
+          syncVariants: config.syncVariants,
         };
       },
     });

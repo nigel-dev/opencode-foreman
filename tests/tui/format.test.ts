@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { parseDecision, parseStatus, type Decision, type Status } from "../../src/rpc.js";
-import { decisionToast, describeDecision, planSummary, progressBar, statusReport } from "../../src/tui/format.js";
+import { decisionToast, describeDecision, desiredVariant, planSummary, progressBar, statusReport } from "../../src/tui/format.js";
 
 const decision = (fields: Partial<Decision>): Decision => ({ time: 0, sessionID: "ses_1", gate: "done", action: "none", reason: "done", ...fields });
 
@@ -11,6 +11,7 @@ const status = (fields: Partial<Status> = {}): Status => ({
   decisionModel: true,
   configFiles: [],
   logFile: null,
+  syncVariants: true,
   ...fields,
 });
 
@@ -77,4 +78,25 @@ test("statusReport lists the plan, gates, decisions, config, and log", () => {
   expect(empty).toContain("No decisions recorded");
   expect(empty).toContain("only the loop guard can run");
   expect(empty).toContain("defaults (no foreman.json found)");
+});
+
+test("desiredVariant uses the session's agent, else the variant the primary agents agree on", () => {
+  const opus = { providerID: "anthropic", id: "claude-opus-5-5" };
+  const fable = { providerID: "anthropic", id: "claude-fable-5-2" };
+  const agents = [
+    { id: "orchestrator", mode: "primary", model: { ...opus, variant: "high" } },
+    { id: "planner", mode: "primary", model: { ...fable, variant: "high" } },
+    { id: "worker-visual", mode: "subagent", model: { ...fable, variant: "max" } },
+    { id: "build", mode: "primary" },
+  ];
+  const model = (ref: { providerID: string; id: string }) => ({ providerID: ref.providerID, modelID: ref.id });
+  expect(desiredVariant(agents, model(opus))).toBe("high");
+  expect(desiredVariant(agents, model(fable))).toBe("high");
+  expect(desiredVariant(agents, model(fable), "worker-visual")).toBe("max");
+  expect(desiredVariant(agents, model(fable), "build")).toBe("high");
+  expect(desiredVariant(agents, { providerID: "openai", modelID: "gpt-6-astra" })).toBeUndefined();
+  const split = [...agents, { id: "custom", mode: "all", model: { ...opus, variant: "low" } }];
+  expect(desiredVariant(split, model(opus))).toBeUndefined();
+  expect(desiredVariant(split, model(opus), "custom")).toBe("low");
+  expect(desiredVariant([{ id: "hidden", mode: "primary", hidden: true, model: { ...opus, variant: "max" } }], model(opus))).toBeUndefined();
 });

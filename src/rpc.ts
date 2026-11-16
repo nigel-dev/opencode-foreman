@@ -33,6 +33,7 @@ export interface Status {
   readonly decisionModel: boolean;
   readonly configFiles: readonly string[];
   readonly logFile: string | null;
+  readonly syncVariants: boolean;
 }
 
 const decision = {
@@ -105,5 +106,6 @@ export function parseStatus(value: unknown): Status | undefined {
     decisionModel: value.decisionModel === true,
     configFiles: Array.isArray(value.configFiles) ? value.configFiles.filter((file): file is string => typeof file === "string") : [],
     logFile: typeof value.logFile === "string" ? value.logFile : null,
+    syncVariants: value.syncVariants !== false,
   };
 }
