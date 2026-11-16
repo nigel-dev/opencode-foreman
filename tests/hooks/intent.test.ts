@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { resolveConfig } from "../src/config.js";
-import { classify, createIntentGate, renderHint } from "../src/gates/intent.js";
-import type { Answers } from "../src/jev.js";
-import { fakeDecider, noul } from "./helpers.js";
+import { resolveConfig } from "../../src/lib/config.js";
+import { classify, createIntentGate, renderHint } from "../../src/hooks/intent.js";
+import type { Answers } from "../../src/lib/jev.js";
+import { fakeDecider, noul } from "../helpers.js";
 
 function answers(choice: string, confidence: number, score: number, ambiguous: number): Answers {
   return {

@@ -1,5 +1,5 @@
-import type { ApprovalConfig } from "../config.js";
-import { probability, type Decider, type Question } from "../jev.js";
+import type { ApprovalConfig } from "../lib/config.js";
+import { probability, type Decider, type Question } from "../lib/jev.js";
 
 export const QUESTIONS = {
   risk: {

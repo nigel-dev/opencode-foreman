@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-import { resolveConfig } from "../src/config.js";
+import { resolveConfig } from "../src/lib/config.js";
 import plugin from "../src/index.js";
-import { BoundedMap, createRootCheck, lastTurn } from "../src/sessions.js";
+import { BoundedMap, createRootCheck, lastTurn } from "../src/lib/sessions.js";
 import { assistant, user } from "./helpers.js";
 
 const originalFetch = globalThis.fetch;

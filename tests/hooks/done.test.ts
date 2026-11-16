@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { resolveConfig } from "../src/config.js";
-import { createDoneGate, judge } from "../src/gates/done.js";
-import type { Answers } from "../src/jev.js";
-import { assistant, fakeDecider, noul, user } from "./helpers.js";
+import { resolveConfig } from "../../src/lib/config.js";
+import { createDoneGate, judge } from "../../src/hooks/done.js";
+import type { Answers } from "../../src/lib/jev.js";
+import { assistant, fakeDecider, noul, user } from "../helpers.js";
 
 function answers(values: { work: number; blocked: number; unfinished: number; claimsDone: number; verified: number; waived?: number }): Answers {
   return Object.fromEntries(Object.entries({ waived: 0, ...values }).map(([name, value]) => [name, noul(value)]));

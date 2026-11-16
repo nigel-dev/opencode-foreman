@@ -1,4 +1,4 @@
-import type { Answer, Answers, Decider, Question } from "../src/jev.js";
+import type { Answer, Answers, Decider, Question } from "../src/lib/jev.js";
 
 export function noul(probability: number): Answer {
   return { type: "noul", probability };

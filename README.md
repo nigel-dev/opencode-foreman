@@ -1,4 +1,14 @@
-# opencode-foreman
+<h1 align="center">OpenCode Foreman</h1>
+
+<p align="center">
+  <strong>Keep your agents on the job until it is actually done.</strong>
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@nigel-dev/opencode-foreman"><img src="https://img.shields.io/npm/v/@nigel-dev/opencode-foreman.svg" alt="npm version" /></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT" /></a>
+  <a href="https://github.com/nigel-dev/opencode-foreman/actions/workflows/ci.yml"><img src="https://github.com/nigel-dev/opencode-foreman/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+</p>
 
 An [OpenCode](https://opencode.ai) V2 plugin that supervises agent sessions with a decision model. It adds three gates:
 
@@ -93,8 +103,13 @@ The model judges wording, not evidence. It can tell that a message says tests pa
 
 ```sh
 bun install
-bun run check   # typecheck, lint, test, build
+bun run typecheck
+bun run lint
+bun run test
+bun run build
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the layout and local testing.
 
 ## License
 

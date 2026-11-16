@@ -1,6 +1,6 @@
-import { INTENTS, type Intent, type IntentGateConfig } from "../config.js";
-import { probability, type Answers, type Decider, type Question } from "../jev.js";
-import { BoundedMap, head } from "../sessions.js";
+import { INTENTS, type Intent, type IntentGateConfig } from "../lib/config.js";
+import { probability, type Answers, type Decider, type Question } from "../lib/jev.js";
+import { BoundedMap, head } from "../lib/sessions.js";
 
 const COMPLEXITY = ["small", "moderate", "large"] as const;
 

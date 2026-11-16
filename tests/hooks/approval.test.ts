@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
-import { DEFAULT_PREFIXES, resolveConfig } from "../src/config.js";
-import { createApprovalGate, screen, type ApprovalRecord, type EvaluateEvent } from "../src/gates/approval.js";
-import { fakeDecider, noul } from "./helpers.js";
+import { DEFAULT_PREFIXES, resolveConfig } from "../../src/lib/config.js";
+import { createApprovalGate, screen, type ApprovalRecord, type EvaluateEvent } from "../../src/hooks/approval.js";
+import { fakeDecider, noul } from "../helpers.js";
 
 test("screen accepts plain eligible commands", () => {
   for (const command of ["git status", "git diff --stat", "bun test tests/a.test.ts", "ls -la src"]) {

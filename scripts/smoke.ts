@@ -1,10 +1,10 @@
 // Runs each gate's questions against the real decision model.
 // Usage: FOREMAN_JEV_API_KEY=... [FOREMAN_JEV_URL=...] [FOREMAN_JEV_MODEL=...] bun scripts/smoke.ts
-import { resolveConfig } from "../src/config.js";
-import { QUESTIONS as APPROVAL, screen } from "../src/gates/approval.js";
-import { QUESTIONS as DONE, judge } from "../src/gates/done.js";
-import { QUESTIONS as INTENT, classify } from "../src/gates/intent.js";
-import { createJevDecider, probability } from "../src/jev.js";
+import { resolveConfig } from "../src/lib/config.js";
+import { QUESTIONS as APPROVAL, screen } from "../src/hooks/approval.js";
+import { QUESTIONS as DONE, judge } from "../src/hooks/done.js";
+import { QUESTIONS as INTENT, classify } from "../src/hooks/intent.js";
+import { createJevDecider, probability } from "../src/lib/jev.js";
 
 const config = resolveConfig();
 const decider = createJevDecider(config.jev);

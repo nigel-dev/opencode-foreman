@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { resolveConfig } from "../src/config.js";
-import { createJevDecider, parseAnswers } from "../src/jev.js";
+import { resolveConfig } from "../../src/lib/config.js";
+import { createJevDecider, parseAnswers } from "../../src/lib/jev.js";
 
 const jev = resolveConfig({ jev: { apiKey: "test-key", url: "http://jev.test/v1/systemone", model: "jev-test" } }).jev;
 

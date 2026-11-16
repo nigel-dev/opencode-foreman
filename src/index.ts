@@ -1,10 +1,10 @@
 import type { Plugin } from "@opencode/plugin";
-import { resolveConfig } from "./config.js";
-import { createApprovalGate } from "./gates/approval.js";
-import { createDoneGate } from "./gates/done.js";
-import { createIntentGate } from "./gates/intent.js";
-import { createJevDecider } from "./jev.js";
-import { createRootCheck } from "./sessions.js";
+import { resolveConfig } from "./lib/config.js";
+import { createApprovalGate } from "./hooks/approval.js";
+import { createDoneGate } from "./hooks/done.js";
+import { createIntentGate } from "./hooks/intent.js";
+import { createJevDecider } from "./lib/jev.js";
+import { createRootCheck } from "./lib/sessions.js";
 
 function report(gate: string, error: unknown): void {
   console.error(`[foreman] ${gate} failed`, error);

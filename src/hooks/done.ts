@@ -1,6 +1,6 @@
-import type { DoneGateConfig } from "../config.js";
-import { probability, type Answers, type Decider, type Question } from "../jev.js";
-import { BoundedMap, head, lastTurn, tail, type SessionReader } from "../sessions.js";
+import type { DoneGateConfig } from "../lib/config.js";
+import { probability, type Answers, type Decider, type Question } from "../lib/jev.js";
+import { BoundedMap, head, lastTurn, tail, type SessionReader } from "../lib/sessions.js";
 
 export const QUESTIONS = {
   work: {
