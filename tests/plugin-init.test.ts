@@ -39,6 +39,17 @@ interface Draft {
   system?: string;
 }
 
+/**
+ * Saves a config file and waits for the plugin to react. A file watcher that has only just started can
+ * miss the first change on macOS, so the file is saved again until the change is noticed.
+ */
+async function saveUntilNoticed(path: string, content: string, events: string[]): Promise<void> {
+  for (let attempt = 0; attempt < 10 && !events.includes("config"); attempt++) {
+    writeFileSync(path, content);
+    for (let waited = 0; waited < 600 && !events.includes("config"); waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 interface Registered {
   name: string;
   execute(input: { sessionID: string; prompt: Record<string, unknown>; delivery: string }): Promise<void>;
@@ -280,8 +291,7 @@ test("editing a config file applies new models, agents, and commands without a r
   expect(agents.get("worker")?.model).toBeUndefined();
   expect(commands).toContain("handoff");
 
-  writeFileSync(join(root, "global", "foreman.jsonc"), `{ "models": { "standard": "anthropic/claude-sonnet-5-5#medium" }, "commands": false }`);
-  for (let waited = 0; waited < 3_000 && !rpc.events.includes("config"); waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+  await saveUntilNoticed(join(root, "global", "foreman.jsonc"), `{ "models": { "standard": "anthropic/claude-sonnet-5-5#medium" }, "commands": false }`, rpc.events);
 
   expect(rpc.events).toContain("config");
   expect(agents.get("worker")?.model).toEqual({ providerID: "anthropic", id: "claude-sonnet-5-5", variant: "medium" });
@@ -398,8 +408,7 @@ test("a config file that cannot be parsed keeps the settings already in use", as
   const cleanup = await plugin.setup(ctx);
   expect(commands).toEqual([]);
 
-  writeFileSync(join(root, "global", "foreman.jsonc"), `{ "commands": fal`);
-  for (let waited = 0; waited < 3_000 && !rpc.events.includes("config"); waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+  await saveUntilNoticed(join(root, "global", "foreman.jsonc"), `{ "commands": fal`, rpc.events);
   expect(rpc.events).toContain("config");
   // Without the file the default would turn the commands back on.
   expect(commands).toEqual([]);
