@@ -110,6 +110,8 @@ A tier or agent with no model inherits the session's model, so the plugin works 
 
 Settings merge in this order, later wins: plugin `options` in `opencode.json`, the global file, the project file. The gate options below can go in the same files.
 
+Any string value can reference an environment variable with `{env:NAME}`. An unset variable resolves to an empty string and is reported in the server log.
+
 ## Configure the gates
 
 The gates need an API key for the decision model. Without one the agents still load and the gates stay inactive.
@@ -120,7 +122,20 @@ The gates need an API key for the decision model. Without one the agents still l
 | `FOREMAN_JEV_URL` | `jev.url` | `https://api.typesafe.ai/v1/systemone` |
 | `FOREMAN_JEV_MODEL` | `jev.model` | `jev-latest` |
 
-Options and config files win over environment variables. Set environment variables on the background service with `opencode service set env NAME value`.
+The same settings can go in a Foreman config file. Use `{env:NAME}` to keep the key itself out of the file, and keep a literal key out of project files, which can end up committed:
+
+```jsonc
+// ~/.config/opencode/foreman.jsonc
+{
+  "jev": {
+    "apiKey": "{env:TYPESAFE_API_KEY}",
+    "url": "https://api.typesafe.ai/v1/systemone",
+    "model": "jev-latest"
+  }
+}
+```
+
+Options and config files win over the `FOREMAN_JEV_*` environment variables. Set environment variables on the background service with `opencode service set env NAME value`.
 
 To route through a LiteLLM proxy, point the URL at its System One path and use the proxy's model name, for example `http://127.0.0.1:4000/v1/systemone` and `typesafe/jev-1.14.0`.
 

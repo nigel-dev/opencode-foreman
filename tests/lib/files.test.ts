@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { globalConfigDir, loadConfigSources, mergeConfig } from "../../src/lib/files.js";
+import { globalConfigDir, loadConfigSources, mergeConfig, substituteEnv } from "../../src/lib/files.js";
 import { parseJsonc } from "../../src/lib/jsonc.js";
 import { formatModel, parseModel } from "../../src/lib/models.js";
 
@@ -58,6 +58,18 @@ test("an unreadable or non-object file is reported and skipped", () => {
   expect(sources.raw).toEqual({ defaultAgent: "build" });
   expect(sources.files).toEqual([]);
   expect(sources.warnings).toHaveLength(2);
+});
+
+test("{env:NAME} references are resolved in files and options, and unset ones are reported", () => {
+  const env = { OPENCODE_CONFIG_DIR: join(root, "global"), JEV_KEY: "secret", HOST: "127.0.0.1" };
+  writeFileSync(join(root, "global", "foreman.jsonc"), `{ "jev": { "apiKey": "{env:JEV_KEY}", "url": "http://{env:HOST}:4000/v1/systemone" } }`);
+  const sources = loadConfigSources({ jev: { model: "{env:MISSING}" }, approval: { prefixes: ["{env:HOST}"] } }, undefined, env);
+  expect(sources.raw).toEqual({
+    jev: { apiKey: "secret", url: "http://127.0.0.1:4000/v1/systemone", model: "" },
+    approval: { prefixes: ["127.0.0.1"] },
+  });
+  expect(sources.warnings).toEqual(["{env:MISSING} is referenced in the Foreman config but MISSING is not set."]);
+  expect(substituteEnv(5, env, [])).toBe(5);
 });
 
 test("parseModel splits provider, model, and variant, and rejects malformed values", () => {

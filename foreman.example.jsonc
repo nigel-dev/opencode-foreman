@@ -21,6 +21,13 @@
   // Agent selected for new sessions. Leave unset to keep OpenCode's default.
   "defaultAgent": "orchestrator",
 
+  // Decision model for the gates. {env:NAME} reads an environment variable, so the key stays out of this file.
+  "jev": {
+    "apiKey": "{env:TYPESAFE_API_KEY}",
+    // "url": "https://api.typesafe.ai/v1/systemone",
+    // "model": "jev-latest",
+  },
+
   // Set to false to skip the bundled agents and use only the gates and model assignment.
   "bundledAgents": true,
 }
