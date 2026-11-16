@@ -15,6 +15,8 @@ Guide for coding agents working on `opencode-foreman`.
 - `src/index.ts` - plugin entry point, reads config and registers hooks.
 - `src/agents/` - bundled agent definitions and the transform that registers them.
 - `src/commands.ts` - slash commands.
+- `src/runtime.ts` - builds gates and commands from the config; rebuilt on config change.
+- `src/rpc.ts`, `src/tui.tsx`, `src/tui/` - RPC contract and the TUI part.
 - `src/hooks/` - one file per gate or guard (`done`, `report`, `intent`, `approval`, `loop`).
 - `src/lib/` - shared logic (config, decision-model client, session helpers).
 - `tests/` - Bun test suite, mirroring `src/`.
@@ -27,7 +29,7 @@ Guide for coding agents working on `opencode-foreman`.
 3. Never use `as any`, `@ts-ignore`, or silent catch blocks. A catch that deliberately fails open says why in a comment.
 4. Keep file ownership boundaries intact (gate logic in `src/hooks`, shared logic in `src/lib`).
 5. Every gate that uses the decision model must do nothing when it is unavailable.
-6. Do not add runtime dependencies. `@opencode/plugin` is a type-only import.
+6. Do not add runtime dependencies beyond `@opencode/plugin`.
 7. Do not commit unless explicitly asked.
 
 ## Build and Verify

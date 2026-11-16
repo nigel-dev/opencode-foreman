@@ -49,6 +49,8 @@ export type Verdict =
       readonly action: "continue";
       readonly reason: "unfinished" | "unverified" | "checks-failed" | "plan-open";
       readonly text: string;
+      /** The failed check command, when a check failed. */
+      readonly detail?: string;
     };
 
 const CONTINUE_UNFINISHED =
@@ -161,8 +163,9 @@ export function createDoneGate(deps: DoneGateDeps): (event: IdleEvent) => Promis
     // The assistant says it is finished. From here, evidence outranks its wording.
     const checked = claimed === true && deps.runChecks !== undefined && facts.directory !== undefined;
     if (checked) {
-      const text = checksFailedText(await deps.runChecks!(facts.directory!));
-      if (text) return send({ action: "continue", reason: "checks-failed", text });
+      const result = await deps.runChecks!(facts.directory!);
+      const text = checksFailedText(result);
+      if (text) return send({ action: "continue", reason: "checks-failed", text, detail: result.failure?.command ?? "" });
     } else if (verdict.action === "continue") {
       return send(verdict);
     }

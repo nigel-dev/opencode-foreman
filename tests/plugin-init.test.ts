@@ -7,7 +7,7 @@ import plugin from "../src/index.js";
 import { BoundedMap, createRootCheck, lastTurn } from "../src/lib/sessions.js";
 import { assistant, user } from "./helpers.js";
 
-const saved = { key: process.env.FOREMAN_JEV_API_KEY, dir: process.env.OPENCODE_CONFIG_DIR };
+const saved = { key: process.env.FOREMAN_JEV_API_KEY, dir: process.env.OPENCODE_CONFIG_DIR, data: process.env.XDG_DATA_HOME };
 let root: string;
 
 // Point the plugin at empty config directories so the developer's own foreman.json cannot leak into a test.
@@ -16,12 +16,13 @@ beforeEach(() => {
   mkdirSync(join(root, "global"));
   mkdirSync(join(root, "project", ".opencode"), { recursive: true });
   process.env.OPENCODE_CONFIG_DIR = join(root, "global");
+  process.env.XDG_DATA_HOME = join(root, "data");
   delete process.env.FOREMAN_JEV_API_KEY;
 });
 
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
-  for (const [name, value] of [["FOREMAN_JEV_API_KEY", saved.key], ["OPENCODE_CONFIG_DIR", saved.dir]] as const) {
+  for (const [name, value] of [["FOREMAN_JEV_API_KEY", saved.key], ["OPENCODE_CONFIG_DIR", saved.dir], ["XDG_DATA_HOME", saved.data]] as const) {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
   }
@@ -41,6 +42,8 @@ interface Draft {
 function fakeContext(options: Record<string, unknown>) {
   const hooks: string[] = [];
   const commands: string[] = [];
+  const replay = { agents: () => {}, commands: () => {} };
+  const rpc: { status: (input: unknown) => Promise<unknown>; events: string[] } = { status: async () => undefined, events: [] };
   const agents = new Map<string, Draft>([["explore", { name: "Explore", mode: "subagent", hidden: false, permissions: [] }]]);
   const state: { defaultAgent?: string | undefined } = {};
   const hook = async (name: string) => {
@@ -62,26 +65,47 @@ function fakeContext(options: Record<string, unknown>) {
   const ctx = {
     options,
     location: { directory: join(root, "project") },
-    agent: { transform: async (callback: (e: typeof editor) => void) => (callback(editor), { dispose: async () => {} }) },
+    agent: {
+      transform: async (callback: (e: typeof editor) => void) => {
+        replay.agents = () => callback(editor);
+        replay.agents();
+        return { dispose: async () => {} };
+      },
+      reload: async () => replay.agents(),
+    },
+    rpc: {
+      register: async (_definition: unknown, handlers: { status: (input: unknown) => Promise<unknown> }) => {
+        rpc.status = handlers.status;
+        return { dispose: async () => {}, events: { emit: async (name: string) => void rpc.events.push(name) } };
+      },
+    },
     model: { list: async () => [] },
     session: { hook, get: async () => ({}), context: async () => [], synthetic: async () => ({}) },
     permission: { hook },
     tool: { hook },
     command: {
       transform: async (callback: (e: { add(command: { name: string }): void }) => void) => {
-        callback({ add: (command) => void commands.push(command.name) });
+        replay.commands = () => {
+          commands.length = 0;
+          callback({ add: (command) => void commands.push(command.name) });
+        };
+        replay.commands();
         return { dispose: async () => {} };
       },
+      reload: async () => replay.commands(),
     },
     storage: { get: async () => undefined, set: async () => {}, remove: async () => {} },
   } as unknown as Setup;
-  return { ctx, hooks, agents, state, commands };
+  return { ctx, hooks, agents, state, commands, rpc };
 }
+
+// Hooks are always registered and consult the current config when they fire, so a config change needs no re-registration.
+const ALL_HOOKS = ["execute.before", "context", "experimental.idle", "prompt", "evaluate"];
 
 test("without an API key the agents are registered and the gates are not", async () => {
   const { ctx, hooks, agents, commands } = fakeContext({});
   const cleanup = await plugin.setup(ctx);
-  expect(hooks).toEqual(["execute.before", "context"]);
+  expect(hooks).toEqual(ALL_HOOKS);
   expect(commands).toEqual(["handoff", "stop-work", "plan", "start-work", "review-work"]);
   expect(agents.has("orchestrator")).toBe(true);
   expect(agents.get("orchestrator")?.model).toBeUndefined();
@@ -112,16 +136,12 @@ test("models come from the global file, then the project file, over plugin optio
   cleanup?.();
 });
 
-test("registers the done and intent gates by default and approval only when enabled", async () => {
+test("registers every hook once and reports which gates the config turned on", async () => {
   const defaults = fakeContext({ jev: { apiKey: "k" } });
   const cleanup = await plugin.setup(defaults.ctx);
-  expect(defaults.hooks).toEqual(["execute.before", "context", "experimental.idle", "prompt", "context"]);
+  expect(defaults.hooks).toEqual(ALL_HOOKS);
   expect(typeof cleanup).toBe("function");
   cleanup?.();
-
-  const all = fakeContext({ jev: { apiKey: "k" }, approval: { enabled: true } });
-  await plugin.setup(all.ctx);
-  expect(all.hooks).toEqual(["execute.before", "context", "experimental.idle", "prompt", "context", "evaluate"]);
 
   const none = fakeContext({
     jev: { apiKey: "k" },
@@ -135,7 +155,15 @@ test("registers the done and intent gates by default and approval only when enab
   });
   await plugin.setup(none.ctx);
   expect(none.commands).toEqual([]);
-  expect(none.hooks).toEqual([]);
+  expect(none.agents.has("orchestrator")).toBe(false);
+  expect(await none.rpc.status({})).toMatchObject({
+    plan: null,
+    decisions: [],
+    gates: { done: false, report: false, intent: false, approval: false, loop: false },
+    decisionModel: true,
+    logFile: join(root, "data", "opencode", "foreman", "decisions.jsonl"),
+  });
+  expect(none.hooks).toEqual(ALL_HOOKS);
 });
 
 test("config falls back to defaults for missing or invalid values and reads the environment", () => {
@@ -190,4 +218,34 @@ test("BoundedMap evicts the oldest entry past its limit", () => {
   map.set("a", 3);
   map.set("c", 4);
   expect([map.get("a"), map.get("b"), map.get("c"), map.size]).toEqual([3, undefined, 4, 2]);
+});
+
+test("editing a config file applies new models, agents, and commands without a restart", async () => {
+  const { ctx, agents, commands, rpc } = fakeContext({});
+  const cleanup = await plugin.setup(ctx);
+  expect(agents.get("worker")?.model).toBeUndefined();
+  expect(commands).toContain("handoff");
+
+  writeFileSync(join(root, "global", "foreman.jsonc"), `{ "models": { "standard": "anthropic/claude-sonnet-5-5#medium" }, "commands": false }`);
+  for (let waited = 0; waited < 3_000 && !rpc.events.includes("config"); waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+
+  expect(rpc.events).toContain("config");
+  expect(agents.get("worker")?.model).toEqual({ providerID: "anthropic", id: "claude-sonnet-5-5", variant: "medium" });
+  expect(commands).toEqual([]);
+  expect(await rpc.status({})).toMatchObject({ configFiles: [join(root, "global", "foreman.jsonc")] });
+  cleanup?.();
+});
+
+test("the status view is seeded from the decision log for this directory", async () => {
+  const logDir = join(root, "data", "opencode", "foreman");
+  mkdirSync(logDir, { recursive: true });
+  const entry = (directory: string, reason: string) =>
+    JSON.stringify({ time: "2026-11-16T05:00:00.000Z", sessionID: "ses_1", gate: "done", action: "none", reason, directory, answers: { work: 0.9 } });
+  writeFileSync(join(logDir, "decisions.jsonl"), [entry(join(root, "project"), "older"), entry("/elsewhere", "other"), entry(join(root, "project"), "newer")].join("\n") + "\n");
+  const { ctx, rpc } = fakeContext({});
+  const cleanup = await plugin.setup(ctx);
+  const status = (await rpc.status({ sessionID: "ses_1" })) as { decisions: Array<{ reason: string; time: number }> };
+  expect(status.decisions.map((decision) => decision.reason)).toEqual(["newer", "older"]);
+  expect(status.decisions[0]?.time).toBe(Date.parse("2026-11-16T05:00:00.000Z"));
+  cleanup?.();
 });

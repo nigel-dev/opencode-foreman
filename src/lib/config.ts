@@ -1,4 +1,5 @@
 import { ROSTER_ROUTES, TIERS, type Tier } from "../agents/index.js";
+import { defaultLogPath, type LogConfig } from "./log.js";
 import { parseModel, type ModelRef } from "./models.js";
 
 export const INTENTS = ["trivial", "explore", "implement", "plan", "research", "discuss"] as const;
@@ -75,6 +76,7 @@ export interface ForemanConfig {
   readonly loopGuard: LoopGuardConfig;
   readonly plans: PlansConfig;
   readonly commands: boolean;
+  readonly log: LogConfig;
   readonly intentGate: IntentGateConfig;
   readonly approval: ApprovalConfig;
 }
@@ -176,6 +178,7 @@ export function resolveConfig(
   const reportGate = section(options.reportGate);
   const loopGuard = section(options.loopGuard);
   const plans = section(options.plans);
+  const log = section(options.log);
   const approval = section(options.approval);
   const routes = section(intentGate.routes);
   const apiKey = text(jev.apiKey, text(env.FOREMAN_JEV_API_KEY, ""));
@@ -208,6 +211,11 @@ export function resolveConfig(
     },
     plans: { enabled: flag(plans.enabled, true) },
     commands: flag(options.commands, true),
+    log: {
+      enabled: flag(log.enabled, true),
+      path: text(log.path, defaultLogPath(env)),
+      maxBytes: bounded(log.maxBytes, 5_000_000, 10_000, 1_000_000_000),
+    },
     intentGate: {
       enabled: flag(intentGate.enabled, true),
       minConfidence: bounded(intentGate.minConfidence, 0.5, 0, 1),

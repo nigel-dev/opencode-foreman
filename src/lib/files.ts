@@ -12,7 +12,7 @@ export interface ConfigSources {
   readonly warnings: readonly string[];
 }
 
-const FILE_NAMES = ["foreman.jsonc", "foreman.json"];
+export const CONFIG_FILE_NAMES = ["foreman.jsonc", "foreman.json"] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -52,8 +52,16 @@ export function globalConfigDir(env: Readonly<Record<string, string | undefined>
   return join(homedir(), ".config", "opencode");
 }
 
+/** The directories a Foreman config file can live in, lowest precedence first. */
+export function configDirectories(
+  projectDirectory: string | undefined,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string[] {
+  return [globalConfigDir(env), ...(projectDirectory ? [join(projectDirectory, ".opencode")] : [])];
+}
+
 function findFile(directory: string): string | undefined {
-  return FILE_NAMES.map((name) => join(directory, name)).find((path) => existsSync(path));
+  return CONFIG_FILE_NAMES.map((name) => join(directory, name)).find((path) => existsSync(path));
 }
 
 export function loadConfigSources(
@@ -61,7 +69,7 @@ export function loadConfigSources(
   projectDirectory: string | undefined,
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): ConfigSources {
-  const candidates = [findFile(globalConfigDir(env)), projectDirectory && findFile(join(projectDirectory, ".opencode"))];
+  const candidates = configDirectories(projectDirectory, env).map(findFile);
   const files: string[] = [];
   const warnings: string[] = [];
   let raw = options;

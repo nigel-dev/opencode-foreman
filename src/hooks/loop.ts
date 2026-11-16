@@ -22,29 +22,58 @@ export function fingerprint(event: Pick<ToolCallEvent, "tool" | "input">): strin
 }
 
 export class RepeatedCallError extends Error {
-  constructor(tool: string, repeats: number) {
+  constructor(
+    readonly tool: string,
+    readonly cycle: number,
+    repeats: number,
+  ) {
     super(
-      `Foreman blocked this call: \`${tool}\` has already run ${repeats} times in a row with exactly these arguments, so running it again will give the same result. ` +
+      (cycle === 1
+        ? `Foreman blocked this call: \`${tool}\` has already run ${repeats} times in a row with exactly these arguments, so running it again will give the same result. `
+        : `Foreman blocked this call: the last ${cycle} tool calls have repeated ${repeats} times in the same order with the same arguments, so going round again will give the same results. `) +
         "Do something different: change the arguments, try another approach, or tell the user what is blocking you.",
     );
     this.name = "RepeatedCallError";
   }
 }
 
+const MAX_CYCLE = 3;
+
+/** The shortest cycle length (1 to 3 calls) that the tail of the history has repeated more than `maxRepeats` times. */
+export function repeatingCycle(history: readonly string[], maxRepeats: number): number | undefined {
+  for (let cycle = 1; cycle <= MAX_CYCLE; cycle++) {
+    const needed = cycle * (maxRepeats + 1);
+    if (history.length < needed) continue;
+    const start = history.length - needed;
+    let periodic = true;
+    for (let index = start + cycle; index < history.length; index++) {
+      if (history[index] !== history[index - cycle]) {
+        periodic = false;
+        break;
+      }
+    }
+    if (periodic) return cycle;
+  }
+  return undefined;
+}
+
 /**
- * Counts consecutive identical tool calls per session and throws once the limit is passed. Any
- * different call in between resets the count, so re-running a check after an edit is unaffected.
+ * Remembers each session's recent tool calls and throws when the same call, or the same short cycle of
+ * calls, has repeated more than `maxRepeats` times. Any different call breaks the pattern, so re-running
+ * a check after an edit is unaffected.
  */
 export function createLoopGuard(config: LoopGuardConfig): (event: ToolCallEvent) => void {
-  const last = new BoundedMap<string, { fingerprint: string; count: number }>();
+  const histories = new BoundedMap<string, string[]>();
   const ignored = new Set(config.ignore);
+  const keep = MAX_CYCLE * (config.maxRepeats + 1);
 
   return (event) => {
     if (ignored.has(event.tool)) return;
-    const current = fingerprint(event);
-    const previous = last.get(event.sessionID);
-    const count = previous?.fingerprint === current ? previous.count + 1 : 1;
-    last.set(event.sessionID, { fingerprint: current, count });
-    if (count > config.maxRepeats) throw new RepeatedCallError(event.tool, config.maxRepeats);
+    const history = histories.get(event.sessionID) ?? [];
+    history.push(fingerprint(event));
+    if (history.length > keep) history.splice(0, history.length - keep);
+    histories.set(event.sessionID, history);
+    const cycle = repeatingCycle(history, config.maxRepeats);
+    if (cycle !== undefined) throw new RepeatedCallError(event.tool, cycle, config.maxRepeats);
   };
 }

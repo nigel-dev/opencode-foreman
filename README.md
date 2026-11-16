@@ -14,13 +14,14 @@ An [OpenCode](https://opencode.ai) V2 plugin that gives you a team of agents and
 
 - **Agents.** It registers a roster of primary agents and subagents, and assigns each one a model from a config file.
 - **Workflow.** It adds slash commands for planning, executing a plan, reviewing, and handing off, and it tracks the plan a session is carrying out.
+- **Terminal UI.** It shows the active plan and what the gates are doing in the TUI, and logs every gate decision to a file.
 - **Supervision.** It watches sessions through these gates and guards:
 
 | Gate | Hook | What it does | Default |
 | --- | --- | --- | --- |
 | Done gate | `session` `experimental.idle` | When a session is about to go idle, checks whether the final message leaves requested work unfinished or claims completion without a check, runs the project checks you configure, and sends a synthetic message telling the agent to continue. | on |
 | Report gate | `session` `experimental.idle` | When a subagent is about to hand back, checks that its report states an outcome and is not half-finished, and sends it back once if not. | on |
-| Loop guard | `tool` `execute.before` | Blocks a tool call that would repeat the previous call exactly for the fifth time in a row. Uses no model. | on |
+| Loop guard | `tool` `execute.before` | Blocks a tool call once the same call, or the same cycle of up to three calls, has repeated four times in a row. Uses no model. | on |
 | Intent gate | `session` `prompt` + `context` | Classifies each user request (intent, size, ambiguity) and adds an advisory routing hint to the system instructions for that turn. The stored user message is not modified. | on |
 | Approval gate | `permission` `evaluate` | Scores the risk of `ask`-level shell commands that pass a strict lexical filter, and allows the low-risk ones. | off, dry run |
 
@@ -111,7 +112,7 @@ Each agent belongs to a tier, and you assign a model to each tier in a Foreman c
 
 A tier or agent with no model inherits the session's model, so the plugin works with no config file at all. A model that is not in OpenCode's catalog is reported in the server log a few seconds after startup. See [`foreman.example.jsonc`](foreman.example.jsonc) for a commented starting point.
 
-Foreman reads its config when OpenCode loads a project. After editing a Foreman config file, run `/reload` (or `opencode reload`) to apply it.
+Foreman watches both locations and applies a change within a second of the file being saved: models, agents, commands, and gate settings are rebuilt in place, with no restart. A project `.opencode/` directory that did not exist when OpenCode loaded the project is picked up on the next `/reload`.
 
 Settings merge in this order, later wins: plugin `options` in `opencode.json`, the global file, the project file. The gate options below can go in the same files.
 
@@ -136,6 +137,37 @@ A plan's tasks are Markdown checkboxes. While a plan is active in a session:
 - The done gate keeps the session going while unticked tasks remain, within `maxContinuations`, and stops tracking the plan once every task is ticked.
 
 The active plan is stored per session in plugin storage and survives a restart. Subagent sessions do not inherit it.
+
+## Terminal UI
+
+The package includes a TUI part, loaded automatically with the server part:
+
+- **Footer.** `plan <name> 2/5` next to the prompt while the session has an active plan.
+- **Sidebar.** A Foreman section with the active plan, a progress bar, and the most recent gate decision.
+- **Toasts.** One when a gate steps in: a nudge to continue, a failed check, a subagent report sent back, a blocked repeat, an auto-approved command. Routine "left alone" verdicts and routing hints stay quiet.
+- **`/foreman`.** A status dialog, also in the command palette as "Foreman: Show status": the plan and its progress, which gates are on, the last ten decisions, and the config and log files in use.
+
+A toast also confirms each config reload.
+
+## Decision log
+
+Every gate decision is appended to a JSON Lines file, one object per line:
+
+```text
+~/.local/share/opencode/foreman/decisions.jsonl
+```
+
+```json
+{"time":"2026-11-16T05:30:12.114Z","sessionID":"ses_…","gate":"done","action":"continue","reason":"checks-failed","detail":"bun test","directory":"/repo","answers":{"work":0.97,"blocked":0.04,"unfinished":0.06,"claimsDone":0.95,"verified":0.9,"waived":0.01},"jevMs":212}
+```
+
+`answers` holds the probabilities the decision model returned, which is what you need to tune a threshold. The log never contains prompts, replies, or check output; it does contain check commands, tool names, and, for the approval gate, the shell command that was scored.
+
+The file follows `XDG_DATA_HOME`. It is renamed to `decisions.jsonl.1` once it passes `maxBytes`, replacing the previous `.1`. Change it with:
+
+```jsonc
+{ "log": { "enabled": true, "path": "/custom/decisions.jsonl", "maxBytes": 5000000 } }
+```
 
 ## Project checks
 
@@ -195,6 +227,7 @@ All options, with their defaults:
         "loopGuard": { "enabled": true, "maxRepeats": 4, "ignore": [] },
         "plans": { "enabled": true },
         "commands": true,
+        "log": { "enabled": true, "maxBytes": 5000000 },
         "intentGate": {
           "enabled": true,
           "minConfidence": 0.5,
@@ -221,7 +254,7 @@ All options, with their defaults:
 
 **Report gate.** It sends the subagent's brief and its final message to the model, and asks for one revision per brief when the report states no outcome or says the task is half-done. A second weak report goes to the parent as it is.
 
-**Loop guard.** It compares each tool call's name and arguments with the previous call in the same session. After `maxRepeats` identical calls in a row, the next one fails with a message telling the agent to change approach, and keeps failing until the agent makes a different call. Any different call resets the count, so re-running a test after an edit is unaffected. List tools that legitimately repeat, such as a polling tool, in `ignore`.
+**Loop guard.** It compares each tool call's name and arguments with the previous call in the same session. After `maxRepeats` identical calls in a row, the next one fails with a message telling the agent to change approach, and keeps failing until the agent makes a different call. It catches short cycles the same way: two or three different calls repeating in the same order with the same arguments. Any call that breaks the pattern resets it, so re-running a test after each edit is unaffected. List tools that legitimately repeat, such as a polling tool, in `ignore`.
 
 **Intent gate.** Intents are `trivial`, `explore`, `implement`, `plan`, `research`, and `discuss`. A classification below `minConfidence` produces no hint.
 
