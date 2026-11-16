@@ -13,6 +13,7 @@ Guide for coding agents working on `opencode-foreman`.
 ## Fast Project Map
 
 - `src/index.ts` - plugin entry point, reads config and registers hooks.
+- `src/agents/` - bundled agent definitions and the transform that registers them.
 - `src/hooks/` - one file per gate (`done`, `intent`, `approval`).
 - `src/lib/` - shared logic (config, decision-model client, session helpers).
 - `tests/` - Bun test suite, mirroring `src/`.

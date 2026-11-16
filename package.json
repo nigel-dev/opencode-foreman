@@ -1,7 +1,7 @@
 {
   "name": "@nigel-dev/opencode-foreman",
   "version": "0.1.0",
-  "description": "OpenCode plugin that routes requests, keeps agents working until the job is verified, and screens routine permission prompts with a decision model",
+  "description": "OpenCode plugin that ships a team of agents with configurable models, keeps them working until the job is verified, and screens routine permission prompts with a decision model",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -12,7 +12,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "foreman.example.jsonc"
   ],
   "publishConfig": {
     "access": "public",

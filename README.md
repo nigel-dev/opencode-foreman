@@ -10,7 +10,10 @@
   <a href="https://github.com/nigel-dev/opencode-foreman/actions/workflows/ci.yml"><img src="https://github.com/nigel-dev/opencode-foreman/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
 </p>
 
-An [OpenCode](https://opencode.ai) V2 plugin that supervises agent sessions with a decision model. It adds three gates:
+An [OpenCode](https://opencode.ai) V2 plugin that gives you a team of agents and keeps them honest. It does two things:
+
+- **Agents.** It registers a roster of primary agents and subagents, and assigns each one a model from a config file.
+- **Gates.** It supervises sessions with a decision model through three gates:
 
 | Gate | Hook | What it does | Default |
 | --- | --- | --- | --- |
@@ -18,7 +21,7 @@ An [OpenCode](https://opencode.ai) V2 plugin that supervises agent sessions with
 | Intent gate | `session` `prompt` + `context` | Classifies each user request (intent, size, ambiguity) and adds an advisory routing hint to the system instructions for that turn. The stored user message is not modified. | on |
 | Approval gate | `permission` `evaluate` | Scores the risk of `ask`-level shell commands that pass a strict lexical filter, and allows the low-risk ones. | off, dry run |
 
-All three use [TypeSafe Jev](https://docs.typesafe.ai), a model that returns probabilities for typed questions instead of text. If the model is unreachable or returns something unusable, every gate does nothing, so an outage never blocks a session.
+All three gates use [TypeSafe Jev](https://docs.typesafe.ai), a model that returns probabilities for typed questions instead of text. If the model is unreachable or returns something unusable, every gate does nothing, so an outage never blocks a session.
 
 Requires OpenCode 2.3.0 or newer. Two of the hooks are marked experimental by OpenCode and may change.
 
@@ -43,9 +46,75 @@ bun install && bun run build
 }
 ```
 
-## Configure
+## Agents
 
-The plugin needs an API key for the decision model. Without one it loads and stays inactive.
+Installing the plugin registers these agents. Nothing needs to be copied into your config directory.
+
+| Agent | Mode | Tier | Role |
+| --- | --- | --- | --- |
+| `orchestrator` | primary | `lead` | Sizes each request, does small work itself, delegates the rest, and verifies results |
+| `planner` | primary | `reasoning` | Interviews you, researches the code, and writes a plan to `.foreman/plans/`; edits nothing else |
+| `deep` | primary or subagent | `deep` | Carries one substantial goal through on its own |
+| `worker` | subagent | `standard` | Ordinary, clearly specified implementation |
+| `worker-quick` | subagent | `fast` | Small mechanical edits |
+| `worker-deep` | subagent | `deep` | Hard or cross-cutting implementation |
+| `worker-visual` | subagent | `reasoning` | User interface work |
+| `tester` | subagent | `standard` | Writing and repairing tests |
+| `writer` | subagent | `standard` | Documentation and prose |
+| `librarian` | subagent | `fast` | External docs, library source, and web research; read-only |
+| `oracle` | subagent | `consult` | Second opinion on architecture and hard bugs; read-only |
+| `plan-consultant` | subagent | `reasoning` | Finds gaps before a plan is written; read-only |
+| `plan-reviewer` | subagent | `consult` | Approves or rejects a written plan; read-only |
+| `reviewer` | subagent | `deep` | Independent review of finished changes; read-only |
+
+OpenCode's built-in `explore` agent is used as is and takes its model from the `fast` tier.
+
+An agent you define yourself with the same ID as a bundled one is overwritten while the bundled agent is enabled. Disable the bundled one to keep yours.
+
+### Models
+
+Each agent belongs to a tier, and you assign a model to each tier in a Foreman config file:
+
+```text
+~/.config/opencode/foreman.jsonc     all projects
+<project>/.opencode/foreman.jsonc    one project
+```
+
+`.json` is also accepted. The global directory follows `OPENCODE_CONFIG_DIR` and `XDG_CONFIG_HOME` the way OpenCode does.
+
+```jsonc
+{
+  "models": {
+    "lead": "anthropic/claude-opus-5-5#high",
+    "reasoning": "anthropic/claude-fable-5-2#high",
+    "consult": "openai/gpt-6-astra#high",
+    "deep": "openai/gpt-6.1-sol#high",
+    "standard": "anthropic/claude-sonnet-5-5#medium",
+    "fast": "anthropic/claude-haiku-5-5#low"
+  },
+  "agents": {
+    "plan-reviewer": { "model": "openai/gpt-6-astra#xhigh" },
+    "writer": { "disabled": true }
+  },
+  "defaultAgent": "orchestrator"
+}
+```
+
+- `models` sets one model per tier, as `provider/model` or `provider/model#variant`.
+- `agents.<id>.model` overrides the tier for one agent. It works for any agent, including ones Foreman does not ship.
+- `agents.<id>.disabled` withholds a bundled agent, or removes any other agent.
+- `defaultAgent` selects the agent for new sessions. Unset, OpenCode's default stays.
+- `bundledAgents: false` skips the roster and keeps the gates and model assignment.
+
+A tier or agent with no model inherits the session's model, so the plugin works with no config file at all. A model that is not in OpenCode's catalog is reported in the server log a few seconds after startup. See [`foreman.example.jsonc`](foreman.example.jsonc) for a commented starting point.
+
+Settings merge in this order, later wins: plugin `options` in `opencode.json`, the global file, the project file. The gate options below can go in the same files.
+
+Any string value can reference an environment variable with `{env:NAME}`. An unset variable resolves to an empty string and is reported in the server log.
+
+## Configure the gates
+
+The gates need an API key for the decision model. Without one the agents still load and the gates stay inactive.
 
 | Environment variable | Option | Default |
 | --- | --- | --- |
@@ -53,7 +122,20 @@ The plugin needs an API key for the decision model. Without one it loads and sta
 | `FOREMAN_JEV_URL` | `jev.url` | `https://api.typesafe.ai/v1/systemone` |
 | `FOREMAN_JEV_MODEL` | `jev.model` | `jev-latest` |
 
-Options win over environment variables. Set environment variables on the background service with `opencode service set env NAME value`.
+The same settings can go in a Foreman config file. Use `{env:NAME}` to keep the key itself out of the file, and keep a literal key out of project files, which can end up committed:
+
+```jsonc
+// ~/.config/opencode/foreman.jsonc
+{
+  "jev": {
+    "apiKey": "{env:TYPESAFE_API_KEY}",
+    "url": "https://api.typesafe.ai/v1/systemone",
+    "model": "jev-latest"
+  }
+}
+```
+
+Options and config files win over the `FOREMAN_JEV_*` environment variables. Set environment variables on the background service with `opencode service set env NAME value`.
 
 To route through a LiteLLM proxy, point the URL at its System One path and use the proxy's model name, for example `http://127.0.0.1:4000/v1/systemone` and `typesafe/jev-1.14.0`.
 

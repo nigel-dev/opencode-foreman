@@ -43,13 +43,22 @@ FOREMAN_JEV_API_KEY=... bun run smoke
 
 ```
 src/
-  index.ts              # Plugin entry point — reads config, registers hooks
+  index.ts              # Plugin entry point — reads config, registers agents and hooks
+  agents/               # Bundled agent roster
+    types.ts            # AgentDefinition, tiers, shared permission sets
+    shared.ts           # Prompt sections reused across agents
+    orchestrator.ts, planner.ts, deep.ts, workers.ts, specialists.ts
+    index.ts            # ROSTER, built-in agent tiers, roster-aware routing hints
+    register.ts         # Agent transform: applies definitions, tier models, overrides
   hooks/                # One file per gate
     done.ts             # session experimental.idle — nudges unfinished or unverified work
     intent.ts           # session prompt + context — classifies requests, injects a routing hint
     approval.ts         # permission evaluate — screens and scores ask-level shell commands
   lib/                  # Shared internal logic
     config.ts           # Options and environment resolution, defaults
+    files.ts            # foreman.json(c) discovery and layered merge
+    jsonc.ts            # Comment and trailing-comma stripping
+    models.ts           # provider/model#variant parsing
     jev.ts              # Decision-model client (System One request and response parsing)
     sessions.ts         # Root-session check, last-turn extraction, bounded per-session state
 tests/                  # Bun test suite, mirroring src/

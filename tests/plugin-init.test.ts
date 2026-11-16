@@ -1,39 +1,106 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { resolveConfig } from "../src/lib/config.js";
 import plugin from "../src/index.js";
 import { BoundedMap, createRootCheck, lastTurn } from "../src/lib/sessions.js";
 import { assistant, user } from "./helpers.js";
 
-const originalFetch = globalThis.fetch;
-const originalKey = process.env.FOREMAN_JEV_API_KEY;
+const saved = { key: process.env.FOREMAN_JEV_API_KEY, dir: process.env.OPENCODE_CONFIG_DIR };
+let root: string;
+
+// Point the plugin at empty config directories so the developer's own foreman.json cannot leak into a test.
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), "foreman-test-"));
+  mkdirSync(join(root, "global"));
+  mkdirSync(join(root, "project", ".opencode"), { recursive: true });
+  process.env.OPENCODE_CONFIG_DIR = join(root, "global");
+  delete process.env.FOREMAN_JEV_API_KEY;
+});
+
 afterEach(() => {
-  globalThis.fetch = originalFetch;
-  if (originalKey === undefined) delete process.env.FOREMAN_JEV_API_KEY;
-  else process.env.FOREMAN_JEV_API_KEY = originalKey;
+  rmSync(root, { recursive: true, force: true });
+  for (const [name, value] of [["FOREMAN_JEV_API_KEY", saved.key], ["OPENCODE_CONFIG_DIR", saved.dir]] as const) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
 });
 
 type Setup = Parameters<typeof plugin.setup>[0];
 
+interface Draft {
+  name: string;
+  mode: string;
+  hidden: boolean;
+  permissions: unknown[];
+  model?: unknown;
+  system?: string;
+}
+
 function fakeContext(options: Record<string, unknown>) {
   const hooks: string[] = [];
+  const agents = new Map<string, Draft>([["explore", { name: "Explore", mode: "subagent", hidden: false, permissions: [] }]]);
+  const state: { defaultAgent?: string | undefined } = {};
   const hook = async (name: string) => {
     hooks.push(name);
     return { dispose: async () => {} };
   };
+  const editor = {
+    get: (id: string) => agents.get(id),
+    update: (id: string, update: (agent: Draft) => void) => {
+      const agent = agents.get(id) ?? { name: id, mode: "primary", hidden: false, permissions: [] };
+      update(agent);
+      agents.set(id, agent);
+    },
+    remove: (id: string) => void agents.delete(id),
+    default: (id: string | undefined) => {
+      state.defaultAgent = id;
+    },
+  };
   const ctx = {
     options,
+    location: { directory: join(root, "project") },
+    agent: { transform: async (callback: (e: typeof editor) => void) => (callback(editor), { dispose: async () => {} }) },
+    model: { list: async () => [] },
     session: { hook, get: async () => ({}), context: async () => [], synthetic: async () => ({}) },
     permission: { hook },
     storage: { set: async () => {} },
   } as unknown as Setup;
-  return { ctx, hooks };
+  return { ctx, hooks, agents, state };
 }
 
-test("registers nothing without an API key", async () => {
-  delete process.env.FOREMAN_JEV_API_KEY;
-  const { ctx, hooks } = fakeContext({});
-  expect(await plugin.setup(ctx)).toBeUndefined();
+test("without an API key the agents are registered and the gates are not", async () => {
+  const { ctx, hooks, agents } = fakeContext({});
+  const cleanup = await plugin.setup(ctx);
   expect(hooks).toEqual([]);
+  expect(agents.has("orchestrator")).toBe(true);
+  expect(agents.get("orchestrator")?.model).toBeUndefined();
+  cleanup?.();
+});
+
+test("models come from the global file, then the project file, over plugin options", async () => {
+  writeFileSync(
+    join(root, "global", "foreman.jsonc"),
+    `{
+      // tiers
+      "models": { "fast": "anthropic/claude-haiku-5-5#low", "lead": "anthropic/claude-opus-5-5#high" },
+      "defaultAgent": "orchestrator",
+    }`,
+  );
+  writeFileSync(
+    join(root, "project", ".opencode", "foreman.json"),
+    JSON.stringify({ agents: { worker: { model: "litellm/chatgpt/gpt-6.1-sol#high" } }, models: { lead: "openai/gpt-6-astra" } }),
+  );
+  const { ctx, agents, state } = fakeContext({ models: { lead: "x/ignored", standard: "anthropic/claude-sonnet-5-5#medium" } });
+  const cleanup = await plugin.setup(ctx);
+  expect(agents.get("orchestrator")?.model).toEqual({ providerID: "openai", id: "gpt-6-astra" });
+  expect(agents.get("worker")?.model).toEqual({ providerID: "litellm", id: "chatgpt/gpt-6.1-sol", variant: "high" });
+  expect(agents.get("tester")?.model).toEqual({ providerID: "anthropic", id: "claude-sonnet-5-5", variant: "medium" });
+  expect(agents.get("explore")?.model).toEqual({ providerID: "anthropic", id: "claude-haiku-5-5", variant: "low" });
+  expect(agents.get("explore")?.system).toBeUndefined();
+  expect(state.defaultAgent).toBe("orchestrator");
+  cleanup?.();
 });
 
 test("registers the done and intent gates by default and approval only when enabled", async () => {
@@ -41,6 +108,7 @@ test("registers the done and intent gates by default and approval only when enab
   const cleanup = await plugin.setup(defaults.ctx);
   expect(defaults.hooks).toEqual(["experimental.idle", "prompt", "context"]);
   expect(typeof cleanup).toBe("function");
+  cleanup?.();
 
   const all = fakeContext({ jev: { apiKey: "k" }, approval: { enabled: true } });
   await plugin.setup(all.ctx);

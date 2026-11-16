@@ -1,3 +1,6 @@
+import { ROSTER_ROUTES, TIERS, type Tier } from "../agents/index.js";
+import { parseModel, type ModelRef } from "./models.js";
+
 export const INTENTS = ["trivial", "explore", "implement", "plan", "research", "discuss"] as const;
 export type Intent = (typeof INTENTS)[number];
 
@@ -27,7 +30,24 @@ export interface ApprovalConfig {
   readonly prefixes: readonly string[];
 }
 
+export interface AgentOverride {
+  readonly model?: ModelRef;
+  readonly disabled?: boolean;
+}
+
+export interface AgentsConfig {
+  /** Register the agents that ship with the plugin. */
+  readonly bundled: boolean;
+  /** Agent to select for new sessions. Left to OpenCode when unset. */
+  readonly defaultAgent: string | undefined;
+  /** Model per tier; every agent in the tier uses it unless overridden. */
+  readonly tiers: Readonly<Partial<Record<Tier, ModelRef>>>;
+  /** Per-agent settings, keyed by agent ID. Applies to any agent, bundled or not. */
+  readonly overrides: Readonly<Record<string, AgentOverride>>;
+}
+
 export interface ForemanConfig {
+  readonly agents: AgentsConfig;
   readonly jev: JevConfig;
   readonly doneGate: DoneGateConfig;
   readonly intentGate: IntentGateConfig;
@@ -89,9 +109,41 @@ function list(value: unknown, fallback: readonly string[]): readonly string[] {
   return value.filter((item): item is string => typeof item === "string" && item.trim() !== "").map((item) => item.trim());
 }
 
+function resolveAgents(options: Source, warnings: string[]): AgentsConfig {
+  const tiers: Partial<Record<Tier, ModelRef>> = {};
+  for (const [tier, value] of Object.entries(section(options.models))) {
+    const model = parseModel(value);
+    if (!(TIERS as readonly string[]).includes(tier)) warnings.push(`models.${tier} is not a tier (${TIERS.join(", ")}); ignored.`);
+    else if (!model) warnings.push(`models.${tier} must look like "provider/model" or "provider/model#variant"; ignored.`);
+    else tiers[tier as Tier] = model;
+  }
+
+  const overrides: Record<string, AgentOverride> = {};
+  for (const [id, value] of Object.entries(section(options.agents))) {
+    const entry = section(value);
+    const model = entry.model === undefined ? undefined : parseModel(entry.model);
+    if (entry.model !== undefined && !model) {
+      warnings.push(`agents.${id}.model must look like "provider/model" or "provider/model#variant"; ignored.`);
+    }
+    overrides[id] = {
+      ...(model ? { model } : {}),
+      ...(typeof entry.disabled === "boolean" ? { disabled: entry.disabled } : {}),
+    };
+  }
+
+  const defaultAgent = text(options.defaultAgent, "");
+  return {
+    bundled: flag(options.bundledAgents, true),
+    defaultAgent: defaultAgent === "" ? undefined : defaultAgent,
+    tiers,
+    overrides,
+  };
+}
+
 export function resolveConfig(
   options: Source = {},
   env: Readonly<Record<string, string | undefined>> = process.env,
+  warnings: string[] = [],
 ): ForemanConfig {
   const jev = section(options.jev);
   const doneGate = section(options.doneGate);
@@ -99,8 +151,11 @@ export function resolveConfig(
   const approval = section(options.approval);
   const routes = section(intentGate.routes);
   const apiKey = text(jev.apiKey, text(env.FOREMAN_JEV_API_KEY, ""));
+  const agents = resolveAgents(options, warnings);
+  const defaultRoutes = agents.bundled ? ROSTER_ROUTES : DEFAULT_ROUTES;
 
   return {
+    agents,
     jev: {
       url: text(jev.url, text(env.FOREMAN_JEV_URL, "https://api.typesafe.ai/v1/systemone")),
       apiKey: apiKey === "" ? undefined : apiKey,
@@ -116,7 +171,7 @@ export function resolveConfig(
       enabled: flag(intentGate.enabled, true),
       minConfidence: bounded(intentGate.minConfidence, 0.5, 0, 1),
       routes: Object.fromEntries(
-        INTENTS.map((intent) => [intent, text(routes[intent], DEFAULT_ROUTES[intent])]),
+        INTENTS.map((intent) => [intent, text(routes[intent], defaultRoutes[intent])]),
       ) as Record<Intent, string>,
     },
     approval: {
