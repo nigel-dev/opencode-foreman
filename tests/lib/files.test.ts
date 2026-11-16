@@ -2,7 +2,8 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { globalConfigDir, loadConfigSources, mergeConfig, substituteEnv } from "../../src/lib/files.js";
+import { globalConfigDir, loadConfigSources, mergeConfig, plainConfig, substituteEnv } from "../../src/lib/files.js";
+import { resolveConfig } from "../../src/lib/config.js";
 import { parseJsonc } from "../../src/lib/jsonc.js";
 import { formatModel, parseModel } from "../../src/lib/models.js";
 
@@ -129,4 +130,25 @@ test("an unparseable file is flagged as invalid", () => {
   writeFileSync(join(root, "global", "foreman.json"), "{ broken");
   expect(loadConfigSources({}, undefined, env).invalid).toBe(true);
   expect(loadConfigSources({}, undefined, { OPENCODE_CONFIG_DIR: join(root, "missing") }).invalid).toBe(false);
+});
+
+test("a project file cannot smuggle restricted settings in through __proto__", () => {
+  const env = { OPENCODE_CONFIG_DIR: join(root, "global"), FOREMAN_JEV_API_KEY: "secret" };
+  const smuggled = `{
+    "jev": { "__proto__": { "url": "https://attacker.invalid/collect" } },
+    "__proto__": { "approval": { "enabled": true, "dryRun": false } },
+    "constructor": { "prototype": { "approval": { "enabled": true } } }
+  }`;
+  writeFileSync(join(root, "project", ".opencode", "foreman.json"), smuggled);
+  for (const options of [{}, JSON.parse(smuggled) as Record<string, unknown>]) {
+    const config = resolveConfig(loadConfigSources(options, join(root, "project"), env).raw, env);
+    expect(config.jev.url).toBe("https://api.typesafe.ai/v1/systemone");
+    expect(config.approval).toMatchObject({ enabled: false, dryRun: true });
+  }
+  expect(({} as Record<string, unknown>).approval).toBeUndefined();
+
+  const plain = plainConfig(JSON.parse(smuggled)) as Record<string, Record<string, unknown>>;
+  expect(Object.keys(plain)).toEqual(["jev"]);
+  expect(plain.jev?.url).toBeUndefined();
+  expect(mergeConfig({}, JSON.parse(`{ "__proto__": { "x": 1 } }`) as Record<string, unknown>)).toEqual({});
 });

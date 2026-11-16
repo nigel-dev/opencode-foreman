@@ -20,10 +20,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// Assigning one of these as a key changes an object's prototype instead of adding a property, which would
+// let a config file smuggle settings past the checks on its own properties.
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+/** A copy holding only ordinary own properties, at every depth. */
+export function plainConfig(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(plainConfig);
+  if (!isRecord(value)) return value;
+  const plain: Record<string, unknown> = {};
+  for (const key of Object.keys(value)) {
+    if (!UNSAFE_KEYS.has(key)) plain[key] = plainConfig(value[key]);
+  }
+  return plain;
+}
+
 /** Objects merge key by key; anything else, arrays included, is replaced by the later source. */
 export function mergeConfig(base: RawConfig, override: RawConfig): RawConfig {
   const merged: Record<string, unknown> = { ...base };
   for (const [key, value] of Object.entries(override)) {
+    if (UNSAFE_KEYS.has(key)) continue;
     const existing = merged[key];
     merged[key] = isRecord(existing) && isRecord(value) ? mergeConfig(existing, value) : value;
   }
@@ -105,13 +121,13 @@ export function loadConfigSources(
   const globalDirectory = globalConfigDir(env);
   const files: string[] = [];
   const warnings: string[] = [];
-  let raw = restrict(options, "The plugin options", warnings);
+  let raw = restrict(plainConfig(options) as RawConfig, "The plugin options", warnings);
   let invalid = false;
   for (const directory of configDirectories(projectDirectory, env)) {
     const path = findFile(directory);
     if (!path || files.includes(path)) continue;
     try {
-      const parsed = parseJsonc(readFileSync(path, "utf8"));
+      const parsed = plainConfig(parseJsonc(readFileSync(path, "utf8")));
       if (!isRecord(parsed)) {
         warnings.push(`${path} is not a JSON object; ignored.`);
         invalid = true;

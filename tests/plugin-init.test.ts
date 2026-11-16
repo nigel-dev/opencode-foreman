@@ -341,27 +341,53 @@ test("/foreman-pause is stored, shown in the status, and survives a plugin reloa
   cleanupSecond?.();
 });
 
-test("a request is recorded when the session accepts it, not when it is merely submitted", async () => {
+test("a request is recorded when the session starts on it, not when it is submitted or queued", async () => {
   const { ctx, stored, emitEvent } = fakeContext({});
   const cleanup = await plugin.setup(ctx);
   const here = { directory: join(root, "project") };
-  const enqueued = (sessionID: string, inboxID: string, item: Record<string, unknown>, location = here) => ({
-    type: "session.inbox.enqueued",
+  const event = (type: string, sessionID: string, inboxID: string, item?: Record<string, unknown>, location = here) => ({
+    type: `session.inbox.${type}`,
     location,
-    data: { sessionID, inboxID, item },
+    data: { sessionID, inboxID, ...(item ? { item } : {}) },
   });
+  const userItem = (text: string) => ({ type: "user", payload: { text }, delivery: "steer" });
 
-  await emitEvent(enqueued("ses_1", "msg_1", { type: "user", payload: { text: "Add a toggle" }, delivery: "steer" }));
+  await emitEvent(event("enqueued", "ses_1", "msg_1", userItem("Add a toggle")));
+  expect(stored.has("session/ses_1/request")).toBe(false);
+  await emitEvent(event("delivered", "ses_1", "msg_1"));
   expect(stored.get("session/ses_1/request")).toEqual({ id: "msg_1", text: "Add a toggle" });
 
-  // A nudge from a gate and a session in another location do not replace it.
-  await emitEvent(enqueued("ses_1", "msg_2", { type: "synthetic", payload: { text: "Continue" }, delivery: "steer" }));
-  await emitEvent(enqueued("ses_9", "msg_3", { type: "user", payload: { text: "Elsewhere" }, delivery: "steer" }, { directory: "/elsewhere" }));
+  // Queued behind the running turn and then cancelled: the running turn's request stays.
+  await emitEvent(event("enqueued", "ses_1", "msg_2", userItem("Something else")));
+  await emitEvent(event("cancelled", "ses_1", "msg_2"));
+  await emitEvent(event("delivered", "ses_1", "msg_2"));
+  // A nudge from a gate, and a session in another location, do not replace it either.
+  await emitEvent(event("enqueued", "ses_1", "msg_3", { type: "synthetic", payload: { text: "Continue" }, delivery: "steer" }));
+  await emitEvent(event("delivered", "ses_1", "msg_3"));
+  await emitEvent(event("enqueued", "ses_9", "msg_4", userItem("Elsewhere"), { directory: "/elsewhere" }));
+  await emitEvent(event("delivered", "ses_9", "msg_4", undefined, { directory: "/elsewhere" }));
   expect(stored.get("session/ses_1/request")).toEqual({ id: "msg_1", text: "Add a toggle" });
   expect(stored.has("session/ses_9/request")).toBe(false);
 
   await emitEvent({ type: "session.deleted", location: here, data: { sessionID: "ses_1" } });
   expect(stored.has("session/ses_1/request")).toBe(false);
+  cleanup?.();
+});
+
+test("a slow storage write for one session does not delay the Stop of another", async () => {
+  const { ctx, stored, emitEvent } = fakeContext({});
+  // Session A's request write never finishes.
+  const set = ctx.storage.set.bind(ctx.storage);
+  (ctx.storage as { set: unknown }).set = (key: string, value: never) => (key.startsWith("session/ses_a/") ? new Promise<void>(() => {}) : set(key, value));
+  const cleanup = await plugin.setup(ctx);
+  const here = { directory: join(root, "project") };
+  await emitEvent({ type: "session.inbox.enqueued", location: here, data: { sessionID: "ses_a", inboxID: "m1", item: { type: "user", payload: { text: "A" }, delivery: "steer" } } });
+  await emitEvent({ type: "session.inbox.delivered", location: here, data: { sessionID: "ses_a", inboxID: "m1" } });
+
+  // Events after the stuck write are still handled: deleting B clears B's stored state.
+  stored.set("session/ses_b/paused", { paused: true });
+  await emitEvent({ type: "session.deleted", location: here, data: { sessionID: "ses_b" } });
+  expect(stored.has("session/ses_b/paused")).toBe(false);
   cleanup?.();
 });
 

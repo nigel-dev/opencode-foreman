@@ -8,7 +8,7 @@ import { createDecisionLog, flattenAnswers, readRecentEntries } from "./lib/log.
 import { formatModel } from "./lib/models.js";
 import { createOperations } from "./lib/operations.js";
 import { createPlanStore, renderActivePlan, type PlanStore } from "./lib/plans.js";
-import { createSessionLookup } from "./lib/sessions.js";
+import { BoundedMap, createSessionLookup } from "./lib/sessions.js";
 import { createSessionState } from "./lib/state.js";
 import { withTrace } from "./lib/trace.js";
 import { watchConfig } from "./lib/watch.js";
@@ -339,27 +339,46 @@ export default {
     // cancelled here: its check is killed and nothing more is sent into the session.
     const events = new AbortController();
     cleanups.push(() => events.abort());
+    // Requests the session has accepted but not started on yet, by inbox ID.
+    const pendingRequests = new BoundedMap<string, string>();
     void (async () => {
-      const types = ["session.execution.interrupted", "session.inbox.enqueued", "session.deleted"] as const;
+      const types = ["session.execution.interrupted", "session.inbox.enqueued", "session.inbox.delivered", "session.inbox.cancelled", "session.deleted"] as const;
+      // Nothing in this loop is awaited: a slow storage write for one session must never hold up the
+      // Stop of another.
       for await (const event of ctx.event.subscribe({ types: [...types], signal: events.signal })) {
         const { sessionID } = event.data;
-        if (event.type === "session.inbox.enqueued") {
-          // Only a user request the session has actually accepted counts; the prompt hook also runs for
-          // submissions that are later rejected. Other locations' sessions belong to their own instance.
-          if (event.data.item.type !== "user" || (event.location && event.location.directory !== directory)) continue;
-          // A new request makes any verdict still being worked out stale, and starts the loop guard afresh.
-          operations.cancel(sessionID);
-          loopHistories.delete(sessionID);
-          // Recorded so the gates still know the request after compaction drops it from the context window.
-          await state
-            .update(sessionID, { request: { id: event.data.inboxID, text: event.data.item.payload.text } })
-            .catch((error: unknown) => report("request record", error));
-          continue;
-        }
-        operations.cancel(sessionID);
-        if (event.type === "session.deleted") {
-          loopHistories.delete(sessionID);
-          await Promise.all([state.remove(sessionID), storedPlans.clear(sessionID)]).catch((error: unknown) => report("session cleanup", error));
+        switch (event.type) {
+          case "session.inbox.enqueued":
+            // The prompt hook also runs for submissions that are later rejected, so the text is taken from
+            // here. Other locations' sessions belong to their own plugin instance.
+            if (event.data.item.type === "user" && (!event.location || event.location.directory === directory)) {
+              pendingRequests.set(event.data.inboxID, event.data.item.payload.text);
+            }
+            break;
+          case "session.inbox.cancelled":
+            pendingRequests.delete(event.data.inboxID);
+            break;
+          case "session.inbox.delivered": {
+            // Only now is it the request the session is working on. One queued behind a running turn, or
+            // cancelled before it started, never replaces the request that turn is answering.
+            const text = pendingRequests.get(event.data.inboxID);
+            if (text === undefined) break;
+            pendingRequests.delete(event.data.inboxID);
+            // A new request makes any verdict still being worked out stale, and starts the loop guard afresh.
+            operations.cancel(sessionID);
+            loopHistories.delete(sessionID);
+            // Recorded so the gates still know the request after compaction drops it from the context window.
+            void state.update(sessionID, { request: { id: event.data.inboxID, text } }).catch((error: unknown) => report("request record", error));
+            break;
+          }
+          case "session.execution.interrupted":
+            operations.cancel(sessionID);
+            break;
+          case "session.deleted":
+            operations.cancel(sessionID);
+            loopHistories.delete(sessionID);
+            void Promise.all([state.remove(sessionID), storedPlans.clear(sessionID)]).catch((error: unknown) => report("session cleanup", error));
+            break;
         }
       }
     })().catch((error: unknown) => {
