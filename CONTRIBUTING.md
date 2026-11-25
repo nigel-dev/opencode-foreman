@@ -52,7 +52,7 @@ src/
   agents/               # Bundled agent roster
     types.ts            # AgentDefinition, tiers, shared permission sets
     shared.ts           # Prompt sections reused across agents
-    orchestrator.ts, planner.ts, deep.ts, workers.ts, specialists.ts
+    orchestrator.ts, planner.ts, security.ts, deep.ts, workers.ts, specialists.ts
     index.ts            # ROSTER, built-in agent tiers, roster-aware routing hints
     register.ts         # Agent transform: applies definitions, tier models, overrides
   commands.ts           # Slash commands: /plan, /start-work, /stop-work, /review-work, /handoff

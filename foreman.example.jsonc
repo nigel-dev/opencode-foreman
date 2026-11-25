@@ -7,6 +7,7 @@
     "lead": "anthropic/claude-opus-5-5#high", // orchestrator
     "reasoning": "anthropic/claude-fable-5-2#high", // planner, plan-consultant, worker-visual
     "consult": "openai/gpt-6-astra#high", // oracle, plan-reviewer
+    "security": "openai/gpt-6-astra#xhigh", // security-researcher
     "deep": "openai/gpt-6.1-sol#high", // deep, worker-deep, reviewer
     "standard": "anthropic/claude-sonnet-5-5#medium", // worker, tester, writer
     "fast": "anthropic/claude-haiku-5-5#low", // worker-quick, librarian, and OpenCode's explore

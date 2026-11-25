@@ -1,4 +1,4 @@
-export const TIERS = ["lead", "reasoning", "consult", "deep", "standard", "fast"] as const;
+export const TIERS = ["lead", "reasoning", "consult", "security", "deep", "standard", "fast"] as const;
 export type Tier = (typeof TIERS)[number];
 
 export interface PermissionRule {
@@ -52,3 +52,5 @@ export const NO_EDITS: readonly PermissionRule[] = [
 export const NO_DELEGATION: readonly PermissionRule[] = [{ action: "subagent", resource: "*", effect: "deny" }];
 
 export const PLAN_DIRECTORY = ".foreman/plans";
+
+export const SECURITY_DIRECTORY = ".foreman/security";

@@ -59,6 +59,7 @@ Installing the plugin registers these agents. Nothing needs to be copied into yo
 | `orchestrator` | primary | `lead` | Sizes each request, does small work itself, delegates the rest, and verifies results |
 | `planner` | primary | `reasoning` | Interviews you, researches the code, and writes a plan to `.foreman/plans/`; edits nothing else |
 | `deep` | primary or subagent | `deep` | Carries one substantial goal through on its own |
+| `security-researcher` | primary | `security` | Threat models, audits for vulnerabilities, and checks dependency risk and CVEs; writes reports to `.foreman/security/` and edits nothing else |
 | `worker` | subagent | `standard` | Ordinary, clearly specified implementation |
 | `worker-quick` | subagent | `fast` | Small mechanical edits |
 | `worker-deep` | subagent | `deep` | Hard or cross-cutting implementation |
@@ -94,6 +95,7 @@ Each agent belongs to a tier, and you assign a model to each tier in a Foreman c
     "lead": "anthropic/claude-opus-5-5#high",
     "reasoning": "anthropic/claude-fable-5-2#high",
     "consult": "openai/gpt-6-astra#high",
+    "security": "openai/gpt-6-astra#xhigh",
     "deep": "openai/gpt-6.1-sol#high",
     "standard": "anthropic/claude-sonnet-5-5#medium",
     "fast": "anthropic/claude-haiku-5-5#low"

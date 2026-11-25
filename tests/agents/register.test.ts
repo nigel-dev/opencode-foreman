@@ -37,7 +37,7 @@ test("the roster is well formed", () => {
     expect(agent.description.length).toBeGreaterThan(20);
     expect(agent.system.length).toBeGreaterThan(200);
   }
-  expect(ROSTER.filter((agent) => agent.mode !== "subagent").map((agent) => agent.id)).toEqual(["orchestrator", "planner", "deep"]);
+  expect(ROSTER.filter((agent) => agent.mode !== "subagent").map((agent) => agent.id)).toEqual(["orchestrator", "planner", "deep", "security-researcher"]);
 });
 
 test("every subagent the prompts and permissions name exists", () => {
@@ -90,6 +90,27 @@ test("tier models apply to every agent in the tier and per-agent models override
   expect(agents.get("worker")?.model).toBeUndefined();
   expect(Object.fromEntries(assignedModels(config))).toMatchObject({ explore: haiku, build: { id: "claude-sonnet-5-5" } });
   expect(assignedModels(config).has("worker")).toBe(false);
+});
+
+test("the security researcher uses the security tier, writes only under .foreman/security, and delegates to three agents", () => {
+  const { config } = agentsConfig({ models: { security: "openai/gpt-6-astra#xhigh" } });
+  const { editor, agents } = fakeEditor({ explore: { mode: "subagent" } });
+  applyAgents(editor, config);
+  const agent = agents.get("security-researcher");
+  expect(ROSTER.find((candidate) => candidate.id === "security-researcher")?.tier).toBe("security");
+  expect(agent).toMatchObject({ name: "Security researcher", mode: "primary", model: { providerID: "openai", id: "gpt-6-astra", variant: "xhigh" } });
+  const permissions = agent?.permissions ?? [];
+  const edits = permissions.filter((rule) => rule.action === "edit");
+  expect(edits).toEqual([
+    { action: "edit", resource: "*", effect: "deny" },
+    { action: "edit", resource: ".foreman/security/*", effect: "allow" },
+    { action: "edit", resource: "*/.foreman/security/*", effect: "allow" },
+  ]);
+  const subagents = permissions.filter((rule) => rule.action === "subagent");
+  expect(subagents[0]).toEqual({ action: "subagent", resource: "*", effect: "deny" });
+  expect(subagents.slice(1).map((rule) => `${rule.resource}:${rule.effect}`)).toEqual(["explore:allow", "librarian:allow", "oracle:allow"]);
+  expect(permissions).toContainEqual({ action: "shell", resource: "git push *", effect: "deny" });
+  expect(resolveConfig({}, {}).intentGate.soloAgents).toContain("security-researcher");
 });
 
 test("disabling a bundled agent withholds ours, and disabling any other agent removes it", () => {

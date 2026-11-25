@@ -1,6 +1,7 @@
 import { deep } from "./deep.js";
 import { orchestrator } from "./orchestrator.js";
 import { planner } from "./planner.js";
+import { securityResearcher } from "./security.js";
 import { librarian, oracle, planConsultant, planReviewer, reviewer, tester, writer } from "./specialists.js";
 import type { AgentDefinition, Tier } from "./types.js";
 import { worker, workerDeep, workerQuick, workerVisual } from "./workers.js";
@@ -9,6 +10,7 @@ export const ROSTER: readonly AgentDefinition[] = [
   orchestrator,
   planner,
   deep,
+  securityResearcher,
   worker,
   workerQuick,
   workerDeep,
@@ -28,7 +30,7 @@ export const BUILTIN_TIERS: Readonly<Record<string, Tier>> = {
 };
 
 /** Agents that do their own work; a routing hint for them leaves out the delegation advice. */
-export const SOLO_AGENTS: readonly string[] = ["deep", "planner"];
+export const SOLO_AGENTS: readonly string[] = ["deep", "planner", "security-researcher"];
 
 /**
  * Routing-hint text that names the bundled agents. An intent whose agents are not all available falls
