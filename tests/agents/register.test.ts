@@ -56,9 +56,11 @@ test("every subagent the prompts and permissions name exists", () => {
 test("with no models configured, bundled agents are registered without a model", () => {
   const { editor, agents, state } = fakeEditor({ explore: { mode: "subagent" } });
   applyAgents(editor, agentsConfig({}).config);
-  expect(agents.size).toBe(ROSTER.length + 1);
+  expect(agents.size).toBe(ROSTER.length + 2); // +1 explore (pre-existing), +1 build alias
   expect(agents.get("orchestrator")).toMatchObject({ name: "Orchestrator", mode: "primary", hidden: false });
   expect(agents.get("orchestrator")?.model).toBeUndefined();
+  // The "build" alias mirrors the orchestrator but stays hidden so stock OpenCode IDs resolve quietly.
+  expect(agents.get("build")).toMatchObject({ name: "Orchestrator", mode: "primary", hidden: true });
   expect(agents.get("explore")?.model).toBeUndefined();
   const oracle = agents.get("oracle")?.permissions ?? [];
   expect(oracle.slice(0, 2)).toEqual([

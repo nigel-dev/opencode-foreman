@@ -39,6 +39,14 @@ export function assignedModels(config: AgentsConfig): ReadonlyMap<string, ModelR
 }
 
 /**
+ * OpenCode's stock default agent is "build". The foreman replaces it with its own roster, but
+ * commands and configs written for vanilla OpenCode still reference the ID. These aliases map
+ * retired stock IDs to the foreman agent that fills the same role, registered as hidden so they
+ * resolve without cluttering the agent picker.
+ */
+const ALIASES: Readonly<Record<string, string>> = { build: "orchestrator" };
+
+/**
  * Runs inside an agent transform, which OpenCode replays from a fresh registry, so it must stay
  * synchronous and free of side effects.
  */
@@ -61,11 +69,31 @@ export function applyAgents(editor: AgentEditor, config: AgentsConfig): void {
         if (model) agent.model = model;
       });
     }
+
+    // Register hidden aliases so stock OpenCode agent IDs resolve to their foreman equivalents.
+    // An alias is NOT skipped when the user disables it: the config entry predates the alias and
+    // was aimed at the old stock agent, not at the redirect we are creating now.
+    for (const [alias, target] of Object.entries(ALIASES)) {
+      if (bundled.has(alias)) continue;
+      const targetDef = ROSTER.find((d) => d.id === target);
+      if (!targetDef) continue;
+      const model = modelFor(alias, targetDef.tier, config);
+      editor.update(alias, (agent) => {
+        agent.name = targetDef.name;
+        agent.description = targetDef.description;
+        agent.mode = targetDef.mode;
+        agent.hidden = true;
+        agent.system = targetDef.system;
+        agent.permissions.push(...targetDef.permissions);
+        if (model) agent.model = model;
+      });
+    }
   }
 
+  const aliases = new Set(Object.keys(ALIASES));
   const others = new Set([...Object.keys(BUILTIN_TIERS), ...Object.keys(config.overrides)]);
   for (const id of others) {
-    if (bundled.has(id) || editor.get(id) === undefined) continue;
+    if (bundled.has(id) || aliases.has(id) || editor.get(id) === undefined) continue;
     if (config.overrides[id]?.disabled) {
       editor.remove(id);
       continue;
