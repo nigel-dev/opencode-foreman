@@ -21,8 +21,13 @@ function harness(bundledAgents = true, disabled: string[] = []) {
   });
   const sent: string[] = [];
   const switched: string[] = [];
+  const created: string[] = [];
   const paused: boolean[] = [];
   const commands = createCommands({
+    createSession: async (agent) => {
+      created.push(agent);
+      return "ses_new";
+    },
     available: (agent) => bundledAgents && !disabled.includes(agent),
     setPaused: async (_sessionID, value) => void paused.push(value),
     plans,
@@ -36,7 +41,7 @@ function harness(bundledAgents = true, disabled: string[] = []) {
     if (!command) throw new Error(`no command ${name}`);
     await command.execute({ sessionID: "ses_1", prompt: { text } });
   };
-  return { commands, run, sent, switched, plans, paused };
+  return { commands, run, sent, switched, created, plans, paused };
 }
 
 test("agent-switching commands are only offered with the bundled agents", () => {
@@ -57,19 +62,21 @@ test("/plan switches to the planner and passes the request through", async () =>
 });
 
 test("/start-work activates the plan and hands it to the orchestrator", async () => {
-  const { run, sent, switched, plans } = harness();
+  const { run, sent, created, plans } = harness();
   const path = join(root, ".foreman", "plans", "auth.md");
   writeFileSync(path, "- [ ] a");
   await run("start-work", "auth");
-  expect(switched).toEqual(["orchestrator"]);
+  expect(created).toEqual(["orchestrator"]);
   expect(sent[0]).toContain(path);
-  expect((await plans.active("ses_1"))?.path).toBe(path);
+  expect(sent[1]).toContain("new session");
+  expect((await plans.active("ses_new"))?.path).toBe(path);
+  expect(await plans.active("ses_1")).toBeUndefined();
 });
 
 test("/start-work with an unknown plan explains and changes nothing", async () => {
-  const { run, sent, switched, plans } = harness();
+  const { run, sent, created, plans } = harness();
   await run("start-work", "nope");
-  expect(switched).toEqual([]);
+  expect(created).toEqual([]);
   expect(sent[0]).toContain('No plan named "nope"');
   expect(await plans.active("ses_1")).toBeUndefined();
 });

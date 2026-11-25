@@ -25,6 +25,8 @@ export interface CommandDeps {
   readonly send: (input: CommandInvocation, text: string) => Promise<void>;
   /** Switches the session to an agent and to that agent's configured model, when it has one. */
   readonly switchAgent: (sessionID: string, agent: string) => Promise<void>;
+  /** Creates a new session with the given bundled agent (and its configured model) and returns its session ID. */
+  readonly createSession: (agent: string) => Promise<string>;
   /** Pauses or resumes supervision for the session. Sends nothing into the session. */
   readonly setPaused: (sessionID: string, paused: boolean) => Promise<void>;
 }
@@ -103,12 +105,13 @@ export function createCommands(deps: CommandDeps): CommandDefinition[] {
           await deps.send(input, `I tried to start work on a plan, but: ${plan.reason} Tell me that and stop.`);
           return;
         }
-        await deps.plans.activate(input.sessionID, plan.path);
-        await deps.switchAgent(input.sessionID, "orchestrator");
+        const newSessionID = await deps.createSession("orchestrator");
+        await deps.plans.activate(newSessionID, plan.path);
         await deps.send(
-          input,
+          { ...input, sessionID: newSessionID },
           `Carry out the plan at \`${plan.path}\`. Read it fully first, then work through its open tasks in order, ticking each checkbox in the plan file once the task is done and verified.`,
         );
+        await deps.send(input, `Foreman started working on the plan at \`${plan.path}\` in a new session. Say so in one sentence and stop.`);
       },
     });
   }
