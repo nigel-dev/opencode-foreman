@@ -116,18 +116,19 @@ export default Tui.define({
 
     // The TUI remembers the last variant picked for each model and applies it over an agent's configured
     // one. When the prompt's model changes, this puts the configured variant back. A variant the user
-    // picks afterwards stays until the model changes again.
+    // picks afterwards stays until the model changes again. Only the model is tracked: the session's agent
+    // becomes known when the first prompt creates the session, and that must not undo a variant just picked.
     const VariantSync = () => {
       let settled: string | undefined;
       createEffect(() => {
         const current = context.ui.model.current();
         const agents = context.data.location.agent.list(context.location) as readonly AgentModel[] | undefined;
         if (!syncVariants() || !current || !agents || agents.length === 0) return;
-        const route = context.ui.router.current();
-        const sessionAgent = route.type === "session" ? context.data.session.get(route.sessionID)?.agent : undefined;
-        const stamp = `${current.providerID}/${current.modelID}|${sessionAgent ?? ""}`;
+        const stamp = `${current.providerID}/${current.modelID}`;
         if (stamp === settled) return;
         settled = stamp;
+        const route = context.ui.router.current();
+        const sessionAgent = route.type === "session" ? context.data.session.get(route.sessionID)?.agent : undefined;
         const wanted = desiredVariant(agents, current, sessionAgent);
         if (wanted && wanted !== current.variant) context.ui.model.variant.set(wanted);
       });
