@@ -72,15 +72,11 @@ export function createReportGate(deps: ReportGateDeps): (event: IdleEvent, opera
     // One revision per brief: a second weak report goes to the parent, which can decide what to do with it.
     if (record.revised === identity.requestID) return { action: "none", reason: "already revised" };
 
-    let verdict: ReportVerdict;
-    if (turn.reply === "") {
-      // Nothing to classify: an empty report is unusable by definition.
-      verdict = { action: "revise", reason: "no-outcome", text: REVISE_NO_OUTCOME };
-    } else {
-      const answers = await deps.decider.ask({ task: head(identity.request, 4_000), report: tail(turn.reply, 8_000) }, QUESTIONS);
-      if (!answers) return { action: "none", reason: "no decision" };
-      verdict = judgeReport(answers, deps.config.threshold);
-    }
+    // An empty report is asked about like any other (the `outcome` criteria name it as "false"), so an
+    // unavailable decision model leaves it alone instead of revising without a decision.
+    const answers = await deps.decider.ask({ task: head(identity.request, 4_000), report: tail(turn.reply, 8_000) }, QUESTIONS);
+    if (!answers) return { action: "none", reason: "no decision" };
+    const verdict = judgeReport(answers, deps.config.threshold);
 
     if (verdict.action === "revise") {
       // The parent may have been paused while the model was deciding.

@@ -45,6 +45,7 @@ for (const item of doneCases) {
 
 const reportCases = [
   { task: "Find where upload retries are implemented", report: "I searched the codebase and looked at several files related to uploads.", expected: "no-outcome" },
+  { task: "Find where upload retries are implemented", report: "", expected: "no-outcome" },
   { task: "Find where upload retries are implemented", report: "Retries live in src/upload/client.ts:88 (retryWithBackoff), called from uploadChunk at line 140. I read both; I did not run anything.", expected: "none" },
   { task: "Rename getUser to fetchUser everywhere", report: "Renamed it in src/api.ts and src/auth.ts. I still need to update the tests and the docs, which I will do next.", expected: "unfinished" },
   { task: "Add a null check to parseConfig", report: "I could not do this: parseConfig does not exist in this repository. The closest match is loadConfig in src/config.ts:12.", expected: "none" },

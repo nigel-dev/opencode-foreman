@@ -60,12 +60,23 @@ test("usable reports, root sessions, unknown sessions, and outages are left alon
   expect(root.decider.calls).toHaveLength(0);
 });
 
-test("an empty report is sent back without asking the model", async () => {
-  const h = harness(GOOD);
-  h.state.messages = [user("u1", "Find where retries are implemented"), { type: "assistant", content: [], finish: "stop" }];
+const EMPTY_REPLY = [user("u1", "Find where retries are implemented"), { type: "assistant", content: [], finish: "stop" }];
+
+test("an empty report is sent back once the model has classified it as having no outcome", async () => {
+  const h = harness(VAGUE);
+  h.state.messages = EMPTY_REPLY;
   expect(await h.gate(idle)).toMatchObject({ action: "revise", reason: "no-outcome" });
-  expect(h.decider.calls).toHaveLength(0);
+  expect(h.decider.calls[0]?.state).toEqual({ task: "Find where retries are implemented", report: "" });
   expect(h.nudges).toHaveLength(1);
+});
+
+test("an empty report is left alone while the decision model is unavailable", async () => {
+  const h = harness(undefined);
+  h.state.messages = EMPTY_REPLY;
+  expect(await h.gate(idle)).toEqual({ action: "none", reason: "no decision" });
+  expect(h.decider.calls).toHaveLength(1);
+  expect(h.nudges).toHaveLength(0);
+  expect((await h.sessions.read("ses_child")).revised).toBeUndefined();
 });
 
 test("the one-revision limit survives a rebuilt gate, and a paused parent pauses its subagents", async () => {
