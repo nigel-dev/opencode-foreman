@@ -105,6 +105,7 @@ export async function readRecentEntries(path: string, limit: number): Promise<Re
       await file.close();
     }
   } catch {
+    // Fails open: the log is only a convenience for the status view, so a missing or unreadable file shows no history.
     return [];
   }
 }

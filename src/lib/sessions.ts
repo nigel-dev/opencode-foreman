@@ -52,6 +52,7 @@ export function createSessionLookup(reader: Pick<SessionReader, "get">): (sessio
       const session = await reader.get({ sessionID });
       return { kind: session.parentID ? "child" : "root", parentID: session.parentID, directory: session.location?.directory };
     } catch {
+      // Fails open: a failed lookup yields `unknown`, which every gate treats as "stay out of the way".
       return { kind: "unknown", parentID: undefined, directory: undefined };
     }
   };
