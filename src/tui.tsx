@@ -1,7 +1,8 @@
 import { Plugin as Tui } from "@opencode/plugin/tui";
 import { Show, createEffect, createSignal, type Accessor } from "solid-js";
 import { foremanRpc, parseDecision, parseHealth, parseStatus, type Status } from "./rpc.js";
-import { checkText, decisionToast, describeDecision, desiredVariant, gateLabel, planSummary, progressBar, statusReport, type AgentModel } from "./tui/format.js";
+import { checkText, decisionToast, describeDecision, gateLabel, planSummary, progressBar, statusReport, type AgentModel } from "./tui/format.js";
+import { createVariantSync } from "./tui/variant-sync.js";
 
 const COMMAND = "foreman.status";
 const CANCEL_COMMAND = "foreman.cancel-check";
@@ -116,21 +117,18 @@ export default Tui.define({
 
     // The TUI remembers the last variant picked for each model and applies it over an agent's configured
     // one. When the prompt's model changes, this puts the configured variant back. A variant the user
-    // picks afterwards stays until the model changes again. Only the model is tracked: the session's agent
-    // becomes known when the first prompt creates the session, and that must not undo a variant just picked.
+    // picks afterwards stays until the model changes again. If the agents disagree, wait for the session's
+    // agent to become known, unless the variant changes while waiting. Resolving the agent never retries
+    // a settled choice or undoes a variant just picked.
     const VariantSync = () => {
-      let settled: string | undefined;
+      const sync = createVariantSync();
       createEffect(() => {
         const current = context.ui.model.current();
         const agents = context.data.location.agent.list(context.location) as readonly AgentModel[] | undefined;
-        if (!syncVariants() || !current || !agents || agents.length === 0) return;
-        const stamp = `${current.providerID}/${current.modelID}`;
-        if (stamp === settled) return;
-        settled = stamp;
         const route = context.ui.router.current();
         const sessionAgent = route.type === "session" ? context.data.session.get(route.sessionID)?.agent : undefined;
-        const wanted = desiredVariant(agents, current, sessionAgent);
-        if (wanted && wanted !== current.variant) context.ui.model.variant.set(wanted);
+        const wanted = sync(syncVariants(), current, agents, sessionAgent);
+        if (wanted) context.ui.model.variant.set(wanted);
       });
       return null;
     };
