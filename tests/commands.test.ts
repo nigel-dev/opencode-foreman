@@ -20,20 +20,26 @@ function harness(bundledAgents = true, disabled: string[] = []) {
     remove: async (key) => void data.delete(key),
   });
   const sent: string[] = [];
+  const delivered: Array<{ sessionID: string; text: string }> = [];
+  const titles: string[] = [];
   const switched: string[] = [];
   const created: string[] = [];
   const paused: boolean[] = [];
   const commands = createCommands({
-    createSession: async (agent) => {
+    createSession: async (agent, title) => {
       created.push(agent);
-      return "ses_new";
+      titles.push(title);
+      return { id: "ses_new", title };
     },
     available: (agent) => bundledAgents && !disabled.includes(agent),
     setPaused: async (_sessionID, value) => void paused.push(value),
     plans,
     lookup: async () => ({ kind: "root", parentID: undefined, directory: root }),
     fallbackDirectory: "/elsewhere",
-    send: async (_input, text) => void sent.push(text),
+    send: async (input, text) => {
+      sent.push(text);
+      delivered.push({ sessionID: input.sessionID, text });
+    },
     switchAgent: async (_sessionID, agent) => void switched.push(agent),
   });
   const run = async (name: string, text = "") => {
@@ -41,7 +47,7 @@ function harness(bundledAgents = true, disabled: string[] = []) {
     if (!command) throw new Error(`no command ${name}`);
     await command.execute({ sessionID: "ses_1", prompt: { text } });
   };
-  return { commands, run, sent, switched, created, plans, paused };
+  return { commands, run, sent, delivered, titles, switched, created, plans, paused };
 }
 
 test("agent-switching commands are only offered with the bundled agents", () => {
@@ -62,13 +68,20 @@ test("/plan switches to the planner and passes the request through", async () =>
 });
 
 test("/start-work activates the plan and hands it to the orchestrator", async () => {
-  const { run, sent, created, plans } = harness();
+  const { run, sent, delivered, titles, created, plans } = harness();
   const path = join(root, ".foreman", "plans", "auth.md");
   writeFileSync(path, "- [ ] a");
   await run("start-work", "auth");
   expect(created).toEqual(["orchestrator"]);
   expect(sent[0]).toContain(path);
-  expect(sent[1]).toContain("new session");
+  expect(titles).toEqual(["Plan: auth"]);
+  expect(delivered).toHaveLength(2);
+  expect(delivered[0]?.sessionID).toBe("ses_new");
+  expect(delivered[0]?.text).toContain(path);
+  expect(delivered[1]?.sessionID).toBe("ses_1");
+  expect(delivered[1]?.text).toContain("new session");
+  expect(delivered[1]?.text).toContain("Plan: auth");
+  expect(delivered[1]?.text).toContain("ses_new");
   expect((await plans.active("ses_new"))?.path).toBe(path);
   expect(await plans.active("ses_1")).toBeUndefined();
 });

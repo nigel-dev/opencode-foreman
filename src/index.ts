@@ -179,13 +179,14 @@ export default {
           const model = assignedModels(runtime.config.agents).get(agent);
           if (model) await ctx.session.switchModel({ sessionID, model: { providerID: model.providerID, id: model.id, ...(model.variant ? { variant: model.variant } : {}) } });
         },
-        createSession: async (agent) => {
+        createSession: async (agent, title) => {
           const model = assignedModels(runtime.config.agents).get(agent);
           const session = await ctx.session.create({
             agent,
+            title,
             ...(model ? { model: { providerID: model.providerID, id: model.id, ...(model.variant ? { variant: model.variant } : {}) } } : {}),
-          } as unknown as Parameters<typeof ctx.session.create>[0]);
-          return (session as unknown as { id: string }).id;
+          });
+          return { id: session.id, title: session.title ?? title };
         },
         setPaused: async (sessionID, paused) => {
           await state.update(sessionID, { paused });

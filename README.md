@@ -131,14 +131,14 @@ In the global file, any string value can reference an environment variable with 
 | Command | What it does |
 | --- | --- |
 | `/plan <request>` | Switches the session to `planner` and starts planning the request |
-| `/start-work [name]` | Makes `.foreman/plans/<name>.md` the session's active plan, switches to `orchestrator`, and starts on it. The name can be omitted when there is only one plan |
+| `/start-work [name]` | Opens a new `orchestrator` session titled `Plan: <name>`, makes `.foreman/plans/<name>.md` its active plan, and starts on it. The current session says where the work went; find the new session in the session list. The name can be omitted when there is only one plan |
 | `/stop-work` | Stops tracking the active plan |
 | `/review-work [focus]` | Sends the `reviewer` subagent over the current changes |
 | `/foreman-pause` | Pauses the done gate, project checks, and report gate for this session and its subagents |
 | `/foreman-resume` | Turns them back on |
 | `/handoff [focus]` | Writes a summary for continuing in a fresh session: goal, state, decisions, files, checks, open issues, next step |
 
-`/plan`, `/start-work`, and `/review-work` are each registered only while the agent they need (`planner`, `orchestrator`, `reviewer`) is enabled. `/plan` and `/start-work` switch the session to that agent and to its configured model. Files and skills attached to a command are passed on to the agent.
+`/plan`, `/start-work`, and `/review-work` are each registered only while the agent they need (`planner`, `orchestrator`, `reviewer`) is enabled. `/plan` switches the session to the planner and its configured model; `/start-work` opens a new session with the orchestrator and its configured model. Files and skills attached to a command are passed on to the agent.
 
 A plan's tasks are Markdown checkboxes. While a plan is active in a session:
 

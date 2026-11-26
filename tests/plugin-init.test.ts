@@ -115,6 +115,10 @@ function fakeContext(options: Record<string, unknown>, stored = new Map<string, 
       prompt: async (input: unknown) => void calls.push({ prompt: input }),
       switchAgent: async (input: unknown) => void calls.push({ switchAgent: input }),
       switchModel: async (input: unknown) => void calls.push({ switchModel: input }),
+      create: async (input: Record<string, unknown>) => {
+        calls.push({ create: input });
+        return { id: "ses_new", title: input.title };
+      },
     },
     event: {
       // An event stream the test can push into; it ends when the plugin unloads.
@@ -331,6 +335,17 @@ test("/plan keeps attachments, drops their text offsets, and switches to the pla
     { switchModel: { sessionID: "ses_1", model: { providerID: "anthropic", id: "claude-fable-5-2", variant: "high" } } },
     { prompt: { sessionID: "ses_1", text: "add OAuth", files: [{ uri: "file:///shot.png" }], skills: [{ id: "frontend" }], delivery: "queue" } },
   ]);
+  cleanup?.();
+});
+
+test("/start-work creates a titled session with the orchestrator and its model, and hands the plan to it", async () => {
+  mkdirSync(join(root, "project", ".foreman", "plans"), { recursive: true });
+  writeFileSync(join(root, "project", ".foreman", "plans", "auth.md"), "- [ ] a");
+  const { ctx, registered, calls } = fakeContext({ models: { lead: "anthropic/claude-opus-5-5#high" } });
+  const cleanup = await plugin.setup(ctx);
+  await registered.get("start-work")?.execute({ sessionID: "ses_1", prompt: { text: "auth" }, delivery: "steer" });
+  expect(calls[0]).toEqual({ create: { agent: "orchestrator", title: "Plan: auth", model: { providerID: "anthropic", id: "claude-opus-5-5", variant: "high" } } });
+  expect(calls.slice(1).map((call) => (call.prompt as { sessionID: string }).sessionID)).toEqual(["ses_new", "ses_1"]);
   cleanup?.();
 });
 
