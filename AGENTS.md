@@ -52,5 +52,5 @@ OpenCode loads `dist/index.js`. Rebuild before testing in a real host, and test 
 - **CI** (`.github/workflows/ci.yml`) — Runs build, typecheck, lint, and tests on PRs and pushes to `main`.
 - **Conventional Commits** (`.github/workflows/conventional-commits.yml`) — Validates PR titles and commit subjects on `main`.
 - **CodeQL** (`.github/workflows/codeql.yml`) — Static analysis for TypeScript; runs on PRs, pushes to `main`, and weekly.
-- **Publish** (`.github/workflows/publish.yml`) — semantic-release to npm on `main`.
+- **Publish** (`.github/workflows/publish.yml`) — release-please keeps a release PR open on `main` that bumps the version and `CHANGELOG.md`; merging it tags the release, creates the GitHub release, and publishes to npm through trusted publishing (bound to this file name, so keep the publish job here).
 - **Renovate** (`renovate.json`) — Automated dependency updates. Uses `chore(deps):` and `ci(deps):` commit prefixes.
