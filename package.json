@@ -1,6 +1,6 @@
 {
   "name": "@nigel-dev/opencode-foreman",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenCode plugin that ships a team of agents with configurable models, keeps them working until the job is verified, and screens routine permission prompts with a decision model",
   "type": "module",
   "main": "./dist/index.js",
@@ -31,7 +31,6 @@
     "lint": "eslint .",
     "test": "bun test",
     "smoke": "bun scripts/smoke.ts",
-    "release": "semantic-release",
     "prepublishOnly": "bun run build",
     "check:pack": "./scripts/check-pack.sh"
   },
@@ -49,7 +48,6 @@
     "@opentui/solid": "0.8.4",
     "@types/bun": "^1.4.4",
     "eslint": "^10.15.0",
-    "semantic-release": "^25.0.3",
     "solid-js": "^1.9.0",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.72.2"

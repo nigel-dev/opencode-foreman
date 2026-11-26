@@ -97,4 +97,4 @@ scripts/
 1. Fork the repo and create a branch from `main`.
 2. Implement your changes, with tests.
 3. Ensure the build, type check, lint, and tests pass.
-4. Use a [Conventional Commits](https://www.conventionalcommits.org) title; releases are cut from commit types by semantic-release.
+4. Use a [Conventional Commits](https://www.conventionalcommits.org) title. release-please reads commit types to build the release PR: `fix` is a patch, `feat` a minor version, and before 1.0 a breaking change is also a minor version. Nothing is published until the release PR is merged.
