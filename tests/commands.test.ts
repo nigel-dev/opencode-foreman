@@ -1,0 +1,127 @@
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createCommands } from "../src/commands.js";
+import { createPlanStore } from "../src/lib/plans.js";
+
+let root: string;
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), "foreman-commands-"));
+  mkdirSync(join(root, ".foreman", "plans"), { recursive: true });
+});
+afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+function harness(bundledAgents = true, disabled: string[] = []) {
+  const data = new Map<string, string>();
+  const plans = createPlanStore({
+    get: async (key) => data.get(key),
+    set: async (key, value) => void data.set(key, value),
+    remove: async (key) => void data.delete(key),
+  });
+  const sent: string[] = [];
+  const delivered: Array<{ sessionID: string; text: string }> = [];
+  const titles: string[] = [];
+  const switched: string[] = [];
+  const created: string[] = [];
+  const paused: boolean[] = [];
+  const commands = createCommands({
+    createSession: async (agent, title) => {
+      created.push(agent);
+      titles.push(title);
+      return { id: "ses_new", title };
+    },
+    available: (agent) => bundledAgents && !disabled.includes(agent),
+    setPaused: async (_sessionID, value) => void paused.push(value),
+    plans,
+    lookup: async () => ({ kind: "root", parentID: undefined, directory: root }),
+    fallbackDirectory: "/elsewhere",
+    send: async (input, text) => {
+      sent.push(text);
+      delivered.push({ sessionID: input.sessionID, text });
+    },
+    switchAgent: async (_sessionID, agent) => void switched.push(agent),
+  });
+  const run = async (name: string, text = "") => {
+    const command = commands.find((item) => item.name === name);
+    if (!command) throw new Error(`no command ${name}`);
+    await command.execute({ sessionID: "ses_1", prompt: { text } });
+  };
+  return { commands, run, sent, delivered, titles, switched, created, plans, paused };
+}
+
+test("agent-switching commands are only offered with the bundled agents", () => {
+  const names = (bundled: boolean, disabled: string[] = []) => harness(bundled, disabled).commands.map((command) => command.name);
+  const always = ["handoff", "stop-work", "foreman-pause", "foreman-resume"];
+  expect(names(true)).toEqual([...always, "plan", "start-work", "review-work"]);
+  expect(names(false)).toEqual(always);
+  expect(names(true, ["planner", "reviewer"])).toEqual([...always, "start-work"]);
+});
+
+test("/plan switches to the planner and passes the request through", async () => {
+  const { run, sent, switched } = harness();
+  await run("plan", "  add OAuth login ");
+  await run("plan");
+  expect(switched).toEqual(["planner", "planner"]);
+  expect(sent[0]).toBe("add OAuth login");
+  expect(sent[1]).toContain("Ask me what it is");
+});
+
+test("/start-work activates the plan and hands it to the orchestrator", async () => {
+  const { run, sent, delivered, titles, created, plans } = harness();
+  const path = join(root, ".foreman", "plans", "auth.md");
+  writeFileSync(path, "- [ ] a");
+  await run("start-work", "auth");
+  expect(created).toEqual(["orchestrator"]);
+  expect(sent[0]).toContain(path);
+  expect(titles).toEqual(["Plan: auth"]);
+  expect(delivered).toHaveLength(2);
+  expect(delivered[0]?.sessionID).toBe("ses_new");
+  expect(delivered[0]?.text).toContain(path);
+  expect(delivered[1]?.sessionID).toBe("ses_1");
+  expect(delivered[1]?.text).toContain("new session");
+  expect(delivered[1]?.text).toContain("Plan: auth");
+  expect(delivered[1]?.text).toContain("ses_new");
+  expect((await plans.active("ses_new"))?.path).toBe(path);
+  expect(await plans.active("ses_1")).toBeUndefined();
+});
+
+test("/start-work with an unknown plan explains and changes nothing", async () => {
+  const { run, sent, created, plans } = harness();
+  await run("start-work", "nope");
+  expect(created).toEqual([]);
+  expect(sent[0]).toContain('No plan named "nope"');
+  expect(await plans.active("ses_1")).toBeUndefined();
+});
+
+test("/stop-work clears the active plan and says whether there was one", async () => {
+  const { run, sent, plans } = harness();
+  const path = join(root, ".foreman", "plans", "auth.md");
+  writeFileSync(path, "- [ ] a");
+  await plans.activate("ses_1", path);
+  await run("stop-work");
+  await run("stop-work");
+  expect(await plans.active("ses_1")).toBeUndefined();
+  expect(sent[0]).toContain(path);
+  expect(sent[1]).toContain("not tracking a plan");
+});
+
+test("/handoff and /review-work append an optional focus", async () => {
+  const { run, sent } = harness();
+  await run("handoff");
+  await run("handoff", "the auth changes");
+  await run("review-work", "error handling");
+  expect(sent[0]).toContain("**Next step**");
+  expect(sent[0]).not.toContain("Pay particular attention");
+  expect(sent[1]).toContain("Pay particular attention to: the auth changes");
+  expect(sent[2]).toContain("`reviewer`");
+  expect(sent[2]).toContain("focus on: error handling");
+});
+
+test("/foreman-pause and /foreman-resume change the pause state and send nothing into the session", async () => {
+  const { run, sent, paused } = harness();
+  await run("foreman-pause");
+  await run("foreman-resume");
+  expect(paused).toEqual([true, false]);
+  expect(sent).toEqual([]);
+});

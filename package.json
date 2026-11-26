@@ -1,7 +1,7 @@
 {
   "name": "@nigel-dev/opencode-foreman",
   "version": "0.1.0",
-  "description": "OpenCode plugin that routes requests, keeps agents working until the job is verified, and screens routine permission prompts with a decision model",
+  "description": "OpenCode plugin that ships a team of agents with configurable models, keeps them working until the job is verified, and screens routine permission prompts with a decision model",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -9,33 +9,48 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./tui": "./src/tui.tsx",
+    "./rpc": {
+      "types": "./dist/rpc.d.ts",
+      "default": "./dist/rpc.js"
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "src",
+    "foreman.example.jsonc"
   ],
   "publishConfig": {
     "access": "public",
     "provenance": true
   },
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "build": "rm -rf dist.next && tsc -p tsconfig.build.json --outDir dist.next && rm -rf dist && mv dist.next dist",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "bun test",
     "smoke": "bun scripts/smoke.ts",
     "release": "semantic-release",
-    "prepublishOnly": "bun run build"
+    "prepublishOnly": "bun run build",
+    "check:pack": "./scripts/check-pack.sh"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.3.0"
   },
   "peerDependencies": {
-    "@opencode/plugin": ">=2.3.0"
+    "@opentui/core": ">=0.8.4",
+    "@opentui/solid": ">=0.8.4",
+    "solid-js": ">=1.9.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@opencode/plugin": "2.3.0",
+    "@opentui/core": "0.8.4",
+    "@opentui/solid": "0.8.4",
     "@types/bun": "^1.4.4",
     "eslint": "^10.15.0",
     "semantic-release": "^25.0.3",
+    "solid-js": "^1.9.0",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.72.2"
   },

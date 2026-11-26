@@ -1,5 +1,8 @@
 export interface SessionReader {
-  get(input: { sessionID: string }): Promise<{ readonly parentID?: string | undefined }>;
+  get(input: { sessionID: string }): Promise<{
+    readonly parentID?: string | undefined;
+    readonly location?: { readonly directory?: string | undefined } | undefined;
+  }>;
   context(input: { sessionID: string }): Promise<ReadonlyArray<unknown>>;
 }
 
@@ -35,25 +38,31 @@ export class BoundedMap<Key, Value> {
   }
 }
 
-/** Gates act on sessions the user drives. A lookup failure counts as "not root" so a gate stays out of the way. */
-export function createRootCheck(reader: Pick<SessionReader, "get">): (sessionID: string) => Promise<boolean> {
-  const known = new BoundedMap<string, boolean>();
+export interface SessionFacts {
+  /** `unknown` when the lookup failed, so a gate can stay out of the way. */
+  readonly kind: "root" | "child" | "unknown";
+  readonly parentID: string | undefined;
+  readonly directory: string | undefined;
+}
+
+/** Looked up fresh each time: a session can move to another directory, and gates run rarely. */
+export function createSessionLookup(reader: Pick<SessionReader, "get">): (sessionID: string) => Promise<SessionFacts> {
   return async (sessionID) => {
-    const cached = known.get(sessionID);
-    if (cached !== undefined) return cached;
     try {
-      const root = !(await reader.get({ sessionID })).parentID;
-      known.set(sessionID, root);
-      return root;
+      const session = await reader.get({ sessionID });
+      return { kind: session.parentID ? "child" : "root", parentID: session.parentID, directory: session.location?.directory };
     } catch {
-      return false;
+      // Fails open: a failed lookup yields `unknown`, which every gate treats as "stay out of the way".
+      return { kind: "unknown", parentID: undefined, directory: undefined };
     }
   };
 }
 
 export interface Turn {
-  readonly userID: string;
-  readonly request: string;
+  /** The latest user message still in the context window; absent once compaction has replaced it. */
+  readonly userID: string | undefined;
+  readonly request: string | undefined;
+  /** The assistant's final text after that message; empty when it said nothing. */
   readonly reply: string;
   readonly failed: boolean;
 }
@@ -71,25 +80,32 @@ function assistantText(message: Record<string, unknown>): string {
     .trim();
 }
 
-/** The latest user request and the assistant's final message after it. */
+/**
+ * The assistant's final message and, when it is still in the window, the user request before it.
+ * `session.context` returns the active window, which starts at the latest compaction, so a long turn
+ * can have assistant messages with no user message in front of them.
+ */
 export function lastTurn(messages: ReadonlyArray<unknown>): Turn | undefined {
   let user: { id: string; text: string } | undefined;
   let reply = "";
   let failed = false;
+  let answered = false;
   for (const message of messages) {
     if (!isRecord(message)) continue;
     if (message.type === "user" && typeof message.id === "string" && typeof message.text === "string") {
       user = { id: message.id, text: message.text };
       reply = "";
       failed = false;
-    } else if (message.type === "assistant" && user) {
+      answered = false;
+    } else if (message.type === "assistant") {
+      answered = true;
       const body = assistantText(message);
       if (body) reply = body;
       failed = message.finish === "error" || message.error !== undefined;
     }
   }
-  if (!user || !reply) return undefined;
-  return { userID: user.id, request: user.text, reply, failed };
+  if (!answered) return undefined;
+  return { userID: user?.id, request: user?.text, reply, failed };
 }
 
 export function head(value: string, limit: number): string {

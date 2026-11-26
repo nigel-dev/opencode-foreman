@@ -1,54 +1,236 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { resolveConfig } from "../src/lib/config.js";
 import plugin from "../src/index.js";
-import { BoundedMap, createRootCheck, lastTurn } from "../src/lib/sessions.js";
+import { BoundedMap, createSessionLookup, lastTurn } from "../src/lib/sessions.js";
 import { assistant, user } from "./helpers.js";
 
-const originalFetch = globalThis.fetch;
-const originalKey = process.env.FOREMAN_JEV_API_KEY;
+const saved = { key: process.env.FOREMAN_JEV_API_KEY, dir: process.env.OPENCODE_CONFIG_DIR, data: process.env.XDG_DATA_HOME };
+let root: string;
+
+// Point the plugin at empty config directories so the developer's own foreman.json cannot leak into a test.
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), "foreman-test-"));
+  mkdirSync(join(root, "global"));
+  mkdirSync(join(root, "project", ".opencode"), { recursive: true });
+  process.env.OPENCODE_CONFIG_DIR = join(root, "global");
+  process.env.XDG_DATA_HOME = join(root, "data");
+  delete process.env.FOREMAN_JEV_API_KEY;
+});
+
 afterEach(() => {
-  globalThis.fetch = originalFetch;
-  if (originalKey === undefined) delete process.env.FOREMAN_JEV_API_KEY;
-  else process.env.FOREMAN_JEV_API_KEY = originalKey;
+  rmSync(root, { recursive: true, force: true });
+  for (const [name, value] of [["FOREMAN_JEV_API_KEY", saved.key], ["OPENCODE_CONFIG_DIR", saved.dir], ["XDG_DATA_HOME", saved.data]] as const) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
 });
 
 type Setup = Parameters<typeof plugin.setup>[0];
 
-function fakeContext(options: Record<string, unknown>) {
+interface Draft {
+  name: string;
+  mode: string;
+  hidden: boolean;
+  permissions: unknown[];
+  model?: unknown;
+  system?: string;
+}
+
+/**
+ * Saves a config file and waits for the plugin to react. A file watcher that has only just started can
+ * miss the first change on macOS, so the file is saved again until the change is noticed.
+ */
+async function saveUntilNoticed(path: string, content: string, events: string[]): Promise<void> {
+  for (let attempt = 0; attempt < 10 && !events.includes("config"); attempt++) {
+    writeFileSync(path, content);
+    for (let waited = 0; waited < 600 && !events.includes("config"); waited += 50) await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+interface Registered {
+  name: string;
+  execute(input: { sessionID: string; prompt: Record<string, unknown>; delivery: string }): Promise<void>;
+}
+
+function fakeContext(options: Record<string, unknown>, stored = new Map<string, unknown>()) {
   const hooks: string[] = [];
+  const commands: string[] = [];
+  const registered = new Map<string, Registered>();
+  const calls: Array<Record<string, unknown>> = [];
+  const contexts = new Map<string, unknown[]>();
+  const pending: Array<Record<string, unknown>> = [];
+  let wake = () => {};
+  const emitEvent = async (event: Record<string, unknown>) => {
+    pending.push(event);
+    wake();
+    // Let the plugin's subscription loop take the event and finish handling it.
+    for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+  };
+  const replay = { agents: () => {}, commands: () => {} };
+  const rpc: { status: (input: unknown) => Promise<unknown>; events: string[] } = { status: async () => undefined, events: [] };
+  const agents = new Map<string, Draft>([["explore", { name: "Explore", mode: "subagent", hidden: false, permissions: [] }]]);
+  const state: { defaultAgent?: string | undefined } = {};
   const hook = async (name: string) => {
     hooks.push(name);
     return { dispose: async () => {} };
   };
+  const editor = {
+    get: (id: string) => agents.get(id),
+    update: (id: string, update: (agent: Draft) => void) => {
+      const agent = agents.get(id) ?? { name: id, mode: "primary", hidden: false, permissions: [] };
+      update(agent);
+      agents.set(id, agent);
+    },
+    remove: (id: string) => void agents.delete(id),
+    default: (id: string | undefined) => {
+      state.defaultAgent = id;
+    },
+  };
   const ctx = {
     options,
-    session: { hook, get: async () => ({}), context: async () => [], synthetic: async () => ({}) },
+    location: { directory: join(root, "project") },
+    agent: {
+      transform: async (callback: (e: typeof editor) => void) => {
+        replay.agents = () => callback(editor);
+        replay.agents();
+        return { dispose: async () => {} };
+      },
+      reload: async () => replay.agents(),
+    },
+    rpc: {
+      register: async (_definition: unknown, handlers: { status: (input: unknown) => Promise<unknown> }) => {
+        rpc.status = handlers.status;
+        return { dispose: async () => {}, events: { emit: async (name: string) => void rpc.events.push(name) } };
+      },
+    },
+    model: { list: async () => [] },
+    session: {
+      hook,
+      get: async () => ({}),
+      context: async ({ sessionID }: { sessionID: string }) => contexts.get(sessionID) ?? [],
+      synthetic: async () => ({}),
+      prompt: async (input: unknown) => void calls.push({ prompt: input }),
+      switchAgent: async (input: unknown) => void calls.push({ switchAgent: input }),
+      switchModel: async (input: unknown) => void calls.push({ switchModel: input }),
+      create: async (input: Record<string, unknown>) => {
+        calls.push({ create: input });
+        return { id: "ses_new", title: input.title };
+      },
+    },
+    event: {
+      // An event stream the test can push into; it ends when the plugin unloads.
+      subscribe: ({ signal }: { signal: AbortSignal }) => ({
+        [Symbol.asyncIterator]: () => ({
+          next: async (): Promise<IteratorResult<Record<string, unknown>>> => {
+            while (pending.length === 0) {
+              if (signal.aborted) return { done: true, value: undefined };
+              await new Promise<void>((resolve) => {
+                wake = resolve;
+                signal.addEventListener("abort", () => resolve(), { once: true });
+              });
+            }
+            return { done: false, value: pending.shift() as Record<string, unknown> };
+          },
+        }),
+      }),
+    },
     permission: { hook },
-    storage: { set: async () => {} },
+    tool: { hook },
+    command: {
+      transform: async (callback: (e: { add(command: Registered): void }) => void) => {
+        replay.commands = () => {
+          commands.length = 0;
+          registered.clear();
+          callback({
+            add: (command) => {
+              commands.push(command.name);
+              registered.set(command.name, command);
+            },
+          });
+        };
+        replay.commands();
+        return { dispose: async () => {} };
+      },
+      reload: async () => replay.commands(),
+    },
+    storage: {
+      get: async (key: string) => stored.get(key),
+      set: async (key: string, value: unknown) => void stored.set(key, value),
+      remove: async (key: string) => void stored.delete(key),
+    },
   } as unknown as Setup;
-  return { ctx, hooks };
+  return { ctx, hooks, agents, state, commands, rpc, registered, calls, stored, emitEvent, contexts };
 }
 
-test("registers nothing without an API key", async () => {
-  delete process.env.FOREMAN_JEV_API_KEY;
-  const { ctx, hooks } = fakeContext({});
-  expect(await plugin.setup(ctx)).toBeUndefined();
-  expect(hooks).toEqual([]);
+// Hooks are always registered and consult the current config when they fire, so a config change needs no re-registration.
+const ALL_HOOKS = ["execute.before", "context", "experimental.idle", "prompt", "evaluate"];
+
+test("without an API key the agents are registered and the gates are not", async () => {
+  const { ctx, hooks, agents, commands } = fakeContext({});
+  const cleanup = await plugin.setup(ctx);
+  expect(hooks).toEqual(ALL_HOOKS);
+  expect(commands).toEqual(["handoff", "stop-work", "foreman-pause", "foreman-resume", "plan", "start-work", "review-work"]);
+  expect(agents.has("orchestrator")).toBe(true);
+  expect(agents.get("orchestrator")?.model).toBeUndefined();
+  cleanup?.();
 });
 
-test("registers the done and intent gates by default and approval only when enabled", async () => {
-  const defaults = fakeContext({ jev: { apiKey: "k" } });
+test("models come from the global file, then the project file, over plugin options", async () => {
+  writeFileSync(
+    join(root, "global", "foreman.jsonc"),
+    `{
+      // tiers
+      "models": { "fast": "anthropic/claude-haiku-5-5#low", "lead": "anthropic/claude-opus-5-5#high" },
+      "defaultAgent": "orchestrator",
+    }`,
+  );
+  writeFileSync(
+    join(root, "project", ".opencode", "foreman.json"),
+    JSON.stringify({ agents: { worker: { model: "litellm/chatgpt/gpt-6.1-sol#high" } }, models: { lead: "openai/gpt-6-astra" } }),
+  );
+  const { ctx, agents, state } = fakeContext({ models: { lead: "x/ignored", standard: "anthropic/claude-sonnet-5-5#medium" } });
+  const cleanup = await plugin.setup(ctx);
+  expect(agents.get("orchestrator")?.model).toEqual({ providerID: "openai", id: "gpt-6-astra" });
+  expect(agents.get("worker")?.model).toEqual({ providerID: "litellm", id: "chatgpt/gpt-6.1-sol", variant: "high" });
+  expect(agents.get("tester")?.model).toEqual({ providerID: "anthropic", id: "claude-sonnet-5-5", variant: "medium" });
+  expect(agents.get("explore")?.model).toEqual({ providerID: "anthropic", id: "claude-haiku-5-5", variant: "low" });
+  expect(agents.get("explore")?.system).toBeUndefined();
+  expect(state.defaultAgent).toBe("orchestrator");
+  cleanup?.();
+});
+
+test("registers every hook once and reports which gates the config turned on", async () => {
+  // The key can only come from the environment or the global Foreman file, never from plugin options.
+  process.env.FOREMAN_JEV_API_KEY = "k";
+  const defaults = fakeContext({ jev: { apiKey: "ignored" } });
   const cleanup = await plugin.setup(defaults.ctx);
-  expect(defaults.hooks).toEqual(["experimental.idle", "prompt", "context"]);
+  expect(defaults.hooks).toEqual(ALL_HOOKS);
   expect(typeof cleanup).toBe("function");
+  cleanup?.();
 
-  const all = fakeContext({ jev: { apiKey: "k" }, approval: { enabled: true } });
-  await plugin.setup(all.ctx);
-  expect(all.hooks).toEqual(["experimental.idle", "prompt", "context", "evaluate"]);
-
-  const none = fakeContext({ jev: { apiKey: "k" }, doneGate: { enabled: false }, intentGate: { enabled: false } });
+  const none = fakeContext({
+    bundledAgents: false,
+    commands: false,
+    doneGate: { enabled: false },
+    reportGate: { enabled: false },
+    intentGate: { enabled: false },
+    loopGuard: { enabled: false },
+    plans: { enabled: false },
+  });
   await plugin.setup(none.ctx);
-  expect(none.hooks).toEqual([]);
+  expect(none.commands).toEqual([]);
+  expect(none.agents.has("orchestrator")).toBe(false);
+  expect(await none.rpc.status({})).toMatchObject({
+    plan: null,
+    decisions: [],
+    gates: { done: false, report: false, intent: false, approval: false, loop: false },
+    decisionModel: true,
+    logFile: join(root, "data", "opencode", "foreman", "decisions.jsonl"),
+  });
+  expect(none.hooks).toEqual(ALL_HOOKS);
 });
 
 test("config falls back to defaults for missing or invalid values and reads the environment", () => {
@@ -62,7 +244,7 @@ test("config falls back to defaults for missing or invalid values and reads the 
     model: "typesafe/jev-1.14.0",
     timeoutMs: 3_000,
   });
-  expect(config.doneGate).toEqual({ enabled: true, maxContinuations: 2, threshold: 0.5 });
+  expect(config.doneGate).toEqual({ enabled: true, maxContinuations: 2, threshold: 0.5, checks: [], checkTimeoutMs: 120_000 });
   expect(config.approval).toMatchObject({ enabled: false, dryRun: true, riskThreshold: 0.2, prefixes: ["git status"] });
   expect(resolveConfig({ jev: { apiKey: "option-key" } }, { FOREMAN_JEV_API_KEY: "env-key" }).jev.apiKey).toBe("option-key");
 });
@@ -77,23 +259,25 @@ test("lastTurn returns the latest request and the final assistant text after it"
     assistant("final reply"),
   ]);
   expect(turn).toEqual({ userID: "u2", request: "second", reply: "final reply", failed: false });
-  expect(lastTurn([assistant("orphan")])).toBeUndefined();
+  expect(lastTurn([])).toBeUndefined();
 });
 
-test("root check caches results and treats lookup failures as not root", async () => {
-  let lookups = 0;
-  const isRoot = createRootCheck({
+test("lastTurn keeps an assistant reply whose user message was compacted away", () => {
+  expect(lastTurn([{ type: "compaction" }, assistant("still here")])).toEqual({ userID: undefined, request: undefined, reply: "still here", failed: false });
+  expect(lastTurn([user("u1", "hi")])).toBeUndefined();
+  expect(lastTurn([user("u1", "hi"), { type: "assistant", content: [], finish: "stop" }])?.reply).toBe("");
+});
+
+test("session lookup reports parents and treats failures as unknown", async () => {
+  const lookup = createSessionLookup({
     get: async ({ sessionID }) => {
-      lookups++;
       if (sessionID === "broken") throw new Error("gone");
-      return sessionID === "child" ? { parentID: "ses_parent" } : {};
+      return sessionID === "child" ? { parentID: "ses_parent", location: { directory: "/repo" } } : {};
     },
   });
-  expect(await isRoot("root")).toBe(true);
-  expect(await isRoot("root")).toBe(true);
-  expect(await isRoot("child")).toBe(false);
-  expect(await isRoot("broken")).toBe(false);
-  expect(lookups).toBe(3);
+  expect(await lookup("root")).toEqual({ kind: "root", parentID: undefined, directory: undefined });
+  expect(await lookup("child")).toEqual({ kind: "child", parentID: "ses_parent", directory: "/repo" });
+  expect((await lookup("broken")).kind).toBe("unknown");
 });
 
 test("BoundedMap evicts the oldest entry past its limit", () => {
@@ -103,4 +287,229 @@ test("BoundedMap evicts the oldest entry past its limit", () => {
   map.set("a", 3);
   map.set("c", 4);
   expect([map.get("a"), map.get("b"), map.get("c"), map.size]).toEqual([3, undefined, 4, 2]);
+});
+
+test("editing a config file applies new models, agents, and commands without a restart", async () => {
+  const { ctx, agents, commands, rpc } = fakeContext({});
+  const cleanup = await plugin.setup(ctx);
+  expect(agents.get("worker")?.model).toBeUndefined();
+  expect(commands).toContain("handoff");
+
+  await saveUntilNoticed(join(root, "global", "foreman.jsonc"), `{ "models": { "standard": "anthropic/claude-sonnet-5-5#medium" }, "commands": false }`, rpc.events);
+
+  expect(rpc.events).toContain("config");
+  expect(agents.get("worker")?.model).toEqual({ providerID: "anthropic", id: "claude-sonnet-5-5", variant: "medium" });
+  expect(commands).toEqual([]);
+  expect(await rpc.status({})).toMatchObject({ configFiles: [join(root, "global", "foreman.jsonc")] });
+  cleanup?.();
+});
+
+test("the status view is seeded from the decision log for this directory", async () => {
+  const logDir = join(root, "data", "opencode", "foreman");
+  mkdirSync(logDir, { recursive: true });
+  const entry = (directory: string, reason: string) =>
+    JSON.stringify({ time: "2026-11-16T05:00:00.000Z", sessionID: "ses_1", gate: "done", action: "none", reason, directory, answers: { work: 0.9 } });
+  writeFileSync(join(logDir, "decisions.jsonl"), [entry(join(root, "project"), "older"), entry("/elsewhere", "other"), entry(join(root, "project"), "newer")].join("\n") + "\n");
+  const { ctx, rpc } = fakeContext({});
+  const cleanup = await plugin.setup(ctx);
+  const status = (await rpc.status({ sessionID: "ses_1" })) as { decisions: Array<{ reason: string; time: number }> };
+  expect(status.decisions.map((decision) => decision.reason)).toEqual(["newer", "older"]);
+  expect(status.decisions[0]?.time).toBe(Date.parse("2026-11-16T05:00:00.000Z"));
+  cleanup?.();
+});
+
+test("/plan keeps attachments, drops their text offsets, and switches to the planner's model", async () => {
+  const { ctx, registered, calls } = fakeContext({ models: { reasoning: "anthropic/claude-fable-5-2#high" } });
+  const cleanup = await plugin.setup(ctx);
+  await registered.get("plan")?.execute({
+    sessionID: "ses_1",
+    prompt: {
+      text: " add OAuth ",
+      files: [{ uri: "file:///shot.png", mention: { start: 0, end: 4, text: "@shot" } }],
+      skills: [{ id: "frontend" }],
+    },
+    delivery: "queue",
+  });
+  expect(calls).toEqual([
+    { switchAgent: { sessionID: "ses_1", agent: "planner" } },
+    { switchModel: { sessionID: "ses_1", model: { providerID: "anthropic", id: "claude-fable-5-2", variant: "high" } } },
+    { prompt: { sessionID: "ses_1", text: "add OAuth", files: [{ uri: "file:///shot.png" }], skills: [{ id: "frontend" }], delivery: "queue" } },
+  ]);
+  cleanup?.();
+});
+
+test("/start-work creates a titled session with the orchestrator and its model, and hands the plan to it", async () => {
+  mkdirSync(join(root, "project", ".foreman", "plans"), { recursive: true });
+  writeFileSync(join(root, "project", ".foreman", "plans", "auth.md"), "- [ ] a");
+  const { ctx, registered, calls } = fakeContext({ models: { lead: "anthropic/claude-opus-5-5#high" } });
+  const cleanup = await plugin.setup(ctx);
+  await registered.get("start-work")?.execute({ sessionID: "ses_1", prompt: { text: "auth" }, delivery: "steer" });
+  expect(calls[0]).toEqual({ create: { agent: "orchestrator", title: "Plan: auth", model: { providerID: "anthropic", id: "claude-opus-5-5", variant: "high" } } });
+  expect(calls.slice(1).map((call) => (call.prompt as { sessionID: string }).sessionID)).toEqual(["ses_new", "ses_1"]);
+  cleanup?.();
+});
+
+test("/foreman-pause is stored, shown in the status, and survives a plugin reload", async () => {
+  const first = fakeContext({});
+  const cleanup = await plugin.setup(first.ctx);
+  await first.registered.get("foreman-pause")?.execute({ sessionID: "ses_1", prompt: { text: "" }, delivery: "steer" });
+  expect(await first.rpc.status({ sessionID: "ses_1" })).toMatchObject({ paused: true, check: null, health: { state: "off" } });
+  expect(await first.rpc.status({ sessionID: "ses_2" })).toMatchObject({ paused: false });
+  expect(first.calls).toEqual([]);
+  cleanup?.();
+
+  // A second plugin instance over the same storage, as after OpenCode reloads the plugin.
+  const second = fakeContext({}, first.stored);
+  const cleanupSecond = await plugin.setup(second.ctx);
+  expect(await second.rpc.status({ sessionID: "ses_1" })).toMatchObject({ paused: true });
+  await second.registered.get("foreman-resume")?.execute({ sessionID: "ses_1", prompt: { text: "" }, delivery: "steer" });
+  expect(await second.rpc.status({ sessionID: "ses_1" })).toMatchObject({ paused: false });
+  cleanupSecond?.();
+});
+
+test("a request is recorded when the session starts on it, not when it is submitted or queued", async () => {
+  const { ctx, stored, emitEvent } = fakeContext({});
+  const cleanup = await plugin.setup(ctx);
+  const here = { directory: join(root, "project") };
+  const event = (type: string, sessionID: string, inboxID: string, item?: Record<string, unknown>, location = here) => ({
+    type: `session.inbox.${type}`,
+    location,
+    data: { sessionID, inboxID, ...(item ? { item } : {}) },
+  });
+  const userItem = (text: string) => ({ type: "user", payload: { text }, delivery: "steer" });
+
+  await emitEvent(event("enqueued", "ses_1", "msg_1", userItem("Add a toggle")));
+  expect(stored.has("session/ses_1/request")).toBe(false);
+  await emitEvent(event("delivered", "ses_1", "msg_1"));
+  expect(stored.get("session/ses_1/request")).toEqual({ id: "msg_1", text: "Add a toggle" });
+
+  // Queued behind the running turn and then cancelled: the running turn's request stays.
+  await emitEvent(event("enqueued", "ses_1", "msg_2", userItem("Something else")));
+  await emitEvent(event("cancelled", "ses_1", "msg_2"));
+  await emitEvent(event("delivered", "ses_1", "msg_2"));
+  // A nudge from a gate, and a session in another location, do not replace it either.
+  await emitEvent(event("enqueued", "ses_1", "msg_3", { type: "synthetic", payload: { text: "Continue" }, delivery: "steer" }));
+  await emitEvent(event("delivered", "ses_1", "msg_3"));
+  await emitEvent(event("enqueued", "ses_9", "msg_4", userItem("Elsewhere"), { directory: "/elsewhere" }));
+  await emitEvent(event("delivered", "ses_9", "msg_4", undefined, { directory: "/elsewhere" }));
+  expect(stored.get("session/ses_1/request")).toEqual({ id: "msg_1", text: "Add a toggle" });
+  expect(stored.has("session/ses_9/request")).toBe(false);
+
+  await emitEvent({ type: "session.deleted", location: here, data: { sessionID: "ses_1" } });
+  expect(stored.has("session/ses_1/request")).toBe(false);
+  cleanup?.();
+});
+
+test("a slow storage write for one session does not delay the Stop of another", async () => {
+  const { ctx, stored, emitEvent } = fakeContext({});
+  // Session A's request write never finishes.
+  const set = ctx.storage.set.bind(ctx.storage);
+  (ctx.storage as { set: unknown }).set = (key: string, value: never) => (key.startsWith("session/ses_a/") ? new Promise<void>(() => {}) : set(key, value));
+  const cleanup = await plugin.setup(ctx);
+  const here = { directory: join(root, "project") };
+  await emitEvent({ type: "session.inbox.enqueued", location: here, data: { sessionID: "ses_a", inboxID: "m1", item: { type: "user", payload: { text: "A" }, delivery: "steer" } } });
+  await emitEvent({ type: "session.inbox.delivered", location: here, data: { sessionID: "ses_a", inboxID: "m1" } });
+
+  // Events after the stuck write are still handled: deleting B clears B's stored state.
+  stored.set("session/ses_b/paused", { paused: true });
+  await emitEvent({ type: "session.deleted", location: here, data: { sessionID: "ses_b" } });
+  expect(stored.has("session/ses_b/paused")).toBe(false);
+  cleanup?.();
+});
+
+test("a config file that cannot be parsed keeps the settings already in use", async () => {
+  writeFileSync(join(root, "global", "foreman.jsonc"), `{ "commands": false }`);
+  const { ctx, commands, rpc } = fakeContext({});
+  const cleanup = await plugin.setup(ctx);
+  expect(commands).toEqual([]);
+
+  await saveUntilNoticed(join(root, "global", "foreman.jsonc"), `{ "commands": fal`, rpc.events);
+  expect(rpc.events).toContain("config");
+  // Without the file the default would turn the commands back on.
+  expect(commands).toEqual([]);
+  cleanup?.();
+});
+
+const HERE = () => ({ directory: join(root, "project") });
+const queued = (sessionID: string, inboxID: string, text: string) => ({
+  type: "session.inbox.enqueued",
+  location: HERE(),
+  data: { sessionID, inboxID, item: { type: "user", payload: { text }, delivery: "steer" } },
+});
+const delivered = (sessionID: string, inboxID: string) => ({ type: "session.inbox.delivered", location: HERE(), data: { sessionID, inboxID } });
+
+test("the newest request is the one stored, even when an earlier write finishes late", async () => {
+  const { ctx, stored, emitEvent } = fakeContext({});
+  const set = ctx.storage.set.bind(ctx.storage);
+  let releaseFirst = () => {};
+  let held = false;
+  (ctx.storage as { set: unknown }).set = async (key: string, value: never) => {
+    if (key === "session/ses_1/request" && !held) {
+      held = true;
+      await new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+    }
+    return set(key, value);
+  };
+  const cleanup = await plugin.setup(ctx);
+  await emitEvent(queued("ses_1", "m1", "first"));
+  await emitEvent(delivered("ses_1", "m1"));
+  await emitEvent(queued("ses_1", "m2", "second"));
+  await emitEvent(delivered("ses_1", "m2"));
+  releaseFirst();
+  for (let turn = 0; turn < 50; turn++) await Promise.resolve();
+  expect(stored.get("session/ses_1/request")).toEqual({ id: "m2", text: "second" });
+  cleanup?.();
+});
+
+test("a request queued before a plugin reload is recovered from the session when it is delivered", async () => {
+  const first = fakeContext({});
+  const cleanupFirst = await plugin.setup(first.ctx);
+  await first.emitEvent(queued("ses_1", "m1", "first"));
+  await first.emitEvent(delivered("ses_1", "m1"));
+  await first.emitEvent(queued("ses_1", "m2", "second"));
+  cleanupFirst?.();
+
+  // The new instance never saw m2 queued.
+  const second = fakeContext({}, first.stored);
+  second.contexts.set("ses_1", [
+    { type: "user", id: "m1", text: "first" },
+    { type: "user", id: "m2", text: "second" },
+    { type: "synthetic", id: "m3", text: "Continue" },
+  ]);
+  const cleanupSecond = await plugin.setup(second.ctx);
+  await second.emitEvent(delivered("ses_1", "m2"));
+  expect(first.stored.get("session/ses_1/request")).toEqual({ id: "m2", text: "second" });
+  // A delivered nudge is not a request.
+  await second.emitEvent(delivered("ses_1", "m3"));
+  expect(first.stored.get("session/ses_1/request")).toEqual({ id: "m2", text: "second" });
+  cleanupSecond?.();
+});
+
+test("a write still in flight in an unloaded plugin instance cannot replace a newer request", async () => {
+  const first = fakeContext({});
+  const set = first.ctx.storage.set.bind(first.ctx.storage);
+  let release = () => {};
+  (first.ctx.storage as { set: unknown }).set = async (key: string, value: never) => {
+    if (key === "session/ses_x/request") {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    }
+    return set(key, value);
+  };
+  const cleanupFirst = await plugin.setup(first.ctx);
+  await first.emitEvent(queued("ses_x", "m1", "first"));
+  await first.emitEvent(delivered("ses_x", "m1"));
+  cleanupFirst?.();
+
+  const second = fakeContext({}, first.stored);
+  const cleanupSecond = await plugin.setup(second.ctx);
+  await second.emitEvent(queued("ses_x", "m2", "second"));
+  await second.emitEvent(delivered("ses_x", "m2"));
+  release();
+  for (let turn = 0; turn < 50; turn++) await Promise.resolve();
+  expect(first.stored.get("session/ses_x/request")).toEqual({ id: "m2", text: "second" });
+  cleanupSecond?.();
 });

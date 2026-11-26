@@ -1,3 +1,7 @@
+import { ROSTER, SOLO_AGENTS, TIERS, rosterRoutes, type Tier } from "../agents/index.js";
+import { defaultLogPath, type LogConfig } from "./log.js";
+import { parseModel, type ModelRef } from "./models.js";
+
 export const INTENTS = ["trivial", "explore", "implement", "plan", "research", "discuss"] as const;
 export type Intent = (typeof INTENTS)[number];
 
@@ -12,12 +16,35 @@ export interface DoneGateConfig {
   readonly enabled: boolean;
   readonly maxContinuations: number;
   readonly threshold: number;
+  /** Commands run in the session's directory when the assistant claims completion; the first failure is sent back. */
+  readonly checks: readonly string[];
+  readonly checkTimeoutMs: number;
+}
+
+export interface ReportGateConfig {
+  readonly enabled: boolean;
+  readonly threshold: number;
+}
+
+export interface LoopGuardConfig {
+  readonly enabled: boolean;
+  /** Identical consecutive calls allowed before the next one is blocked. */
+  readonly maxRepeats: number;
+  /** Tool names the guard never counts. */
+  readonly ignore: readonly string[];
+}
+
+export interface PlansConfig {
+  /** Inject the session's active plan into each model request and hold the session to its open tasks. */
+  readonly enabled: boolean;
 }
 
 export interface IntentGateConfig {
   readonly enabled: boolean;
   readonly minConfidence: number;
   readonly routes: Readonly<Record<Intent, string>>;
+  /** Agents whose hint omits the suggested handling, because they do the work themselves. */
+  readonly soloAgents: readonly string[];
 }
 
 export interface ApprovalConfig {
@@ -27,9 +54,33 @@ export interface ApprovalConfig {
   readonly prefixes: readonly string[];
 }
 
+export interface AgentOverride {
+  readonly model?: ModelRef;
+  readonly disabled?: boolean;
+}
+
+export interface AgentsConfig {
+  /** Register the agents that ship with the plugin. */
+  readonly bundled: boolean;
+  /** Agent to select for new sessions. Left to OpenCode when unset. */
+  readonly defaultAgent: string | undefined;
+  /** Model per tier; every agent in the tier uses it unless overridden. */
+  readonly tiers: Readonly<Partial<Record<Tier, ModelRef>>>;
+  /** Per-agent settings, keyed by agent ID. Applies to any agent, bundled or not. */
+  readonly overrides: Readonly<Record<string, AgentOverride>>;
+}
+
 export interface ForemanConfig {
+  readonly agents: AgentsConfig;
   readonly jev: JevConfig;
   readonly doneGate: DoneGateConfig;
+  readonly reportGate: ReportGateConfig;
+  readonly loopGuard: LoopGuardConfig;
+  readonly plans: PlansConfig;
+  readonly commands: boolean;
+  /** Let the TUI part set the prompt's variant to the selected agent's configured one when the model changes. */
+  readonly syncVariants: boolean;
+  readonly log: LogConfig;
   readonly intentGate: IntentGateConfig;
   readonly approval: ApprovalConfig;
 }
@@ -89,18 +140,63 @@ function list(value: unknown, fallback: readonly string[]): readonly string[] {
   return value.filter((item): item is string => typeof item === "string" && item.trim() !== "").map((item) => item.trim());
 }
 
+function resolveAgents(options: Source, warnings: string[]): AgentsConfig {
+  const tiers: Partial<Record<Tier, ModelRef>> = {};
+  for (const [tier, value] of Object.entries(section(options.models))) {
+    const model = parseModel(value);
+    if (!(TIERS as readonly string[]).includes(tier)) warnings.push(`models.${tier} is not a tier (${TIERS.join(", ")}); ignored.`);
+    else if (!model) warnings.push(`models.${tier} must look like "provider/model" or "provider/model#variant"; ignored.`);
+    else tiers[tier as Tier] = model;
+  }
+
+  const overrides: Record<string, AgentOverride> = {};
+  for (const [id, value] of Object.entries(section(options.agents))) {
+    const entry = section(value);
+    const model = entry.model === undefined ? undefined : parseModel(entry.model);
+    if (entry.model !== undefined && !model) {
+      warnings.push(`agents.${id}.model must look like "provider/model" or "provider/model#variant"; ignored.`);
+    }
+    overrides[id] = {
+      ...(model ? { model } : {}),
+      ...(typeof entry.disabled === "boolean" ? { disabled: entry.disabled } : {}),
+    };
+  }
+
+  const defaultAgent = text(options.defaultAgent, "");
+  return {
+    bundled: flag(options.bundledAgents, true),
+    defaultAgent: defaultAgent === "" ? undefined : defaultAgent,
+    tiers,
+    overrides,
+  };
+}
+
+/** Whether a bundled agent (or OpenCode's `explore`, which the roster relies on) is registered and not disabled. */
+export function bundledAgentAvailable(agents: AgentsConfig, id: string): boolean {
+  if (agents.overrides[id]?.disabled) return false;
+  return id === "explore" || (agents.bundled && ROSTER.some((agent) => agent.id === id));
+}
+
 export function resolveConfig(
   options: Source = {},
   env: Readonly<Record<string, string | undefined>> = process.env,
+  warnings: string[] = [],
 ): ForemanConfig {
   const jev = section(options.jev);
   const doneGate = section(options.doneGate);
   const intentGate = section(options.intentGate);
+  const reportGate = section(options.reportGate);
+  const loopGuard = section(options.loopGuard);
+  const plans = section(options.plans);
+  const log = section(options.log);
   const approval = section(options.approval);
   const routes = section(intentGate.routes);
   const apiKey = text(jev.apiKey, text(env.FOREMAN_JEV_API_KEY, ""));
+  const agents = resolveAgents(options, warnings);
+  const defaultRoutes = agents.bundled ? rosterRoutes((agent) => bundledAgentAvailable(agents, agent), DEFAULT_ROUTES) : DEFAULT_ROUTES;
 
   return {
+    agents,
     jev: {
       url: text(jev.url, text(env.FOREMAN_JEV_URL, "https://api.typesafe.ai/v1/systemone")),
       apiKey: apiKey === "" ? undefined : apiKey,
@@ -111,13 +207,33 @@ export function resolveConfig(
       enabled: flag(doneGate.enabled, true),
       maxContinuations: Math.floor(bounded(doneGate.maxContinuations, 2, 0, 10)),
       threshold: bounded(doneGate.threshold, 0.5, 0, 1),
+      checks: list(doneGate.checks, []),
+      checkTimeoutMs: bounded(doneGate.checkTimeoutMs, 120_000, 1_000, 900_000),
+    },
+    reportGate: {
+      enabled: flag(reportGate.enabled, true),
+      threshold: bounded(reportGate.threshold, 0.5, 0, 1),
+    },
+    loopGuard: {
+      enabled: flag(loopGuard.enabled, true),
+      maxRepeats: Math.floor(bounded(loopGuard.maxRepeats, 4, 1, 100)),
+      ignore: list(loopGuard.ignore, []),
+    },
+    plans: { enabled: flag(plans.enabled, true) },
+    commands: flag(options.commands, true),
+    syncVariants: flag(section(options.tui).syncVariants, true),
+    log: {
+      enabled: flag(log.enabled, true),
+      path: text(log.path, defaultLogPath(env)),
+      maxBytes: bounded(log.maxBytes, 5_000_000, 10_000, 1_000_000_000),
     },
     intentGate: {
       enabled: flag(intentGate.enabled, true),
       minConfidence: bounded(intentGate.minConfidence, 0.5, 0, 1),
       routes: Object.fromEntries(
-        INTENTS.map((intent) => [intent, text(routes[intent], DEFAULT_ROUTES[intent])]),
+        INTENTS.map((intent) => [intent, text(routes[intent], defaultRoutes[intent])]),
       ) as Record<Intent, string>,
+      soloAgents: agents.bundled ? SOLO_AGENTS : [],
     },
     approval: {
       enabled: flag(approval.enabled, false),

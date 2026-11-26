@@ -55,7 +55,10 @@ export function parseAnswers(body: unknown, names: readonly string[]): Answers |
   return answers;
 }
 
-export function createJevDecider(config: JevConfig, fetchImpl: Fetch = fetch): Decider | undefined {
+export type JevOutcome = { readonly ok: true } | { readonly ok: false; readonly reason: string };
+
+/** `observe` is told how each call went, so a silent failure can be shown to the user. */
+export function createJevDecider(config: JevConfig, fetchImpl: Fetch = fetch, observe: (outcome: JevOutcome) => void = () => {}): Decider | undefined {
   const { apiKey } = config;
   if (!apiKey) return undefined;
   return {
@@ -67,10 +70,16 @@ export function createJevDecider(config: JevConfig, fetchImpl: Fetch = fetch): D
           body: JSON.stringify({ model: config.model, state, questions }),
           signal: AbortSignal.timeout(config.timeoutMs),
         });
-        if (!response.ok) return undefined;
-        return parseAnswers(await response.json(), Object.keys(questions));
-      } catch {
+        if (!response.ok) {
+          observe({ ok: false, reason: `HTTP ${response.status}` });
+          return undefined;
+        }
+        const answers = parseAnswers(await response.json(), Object.keys(questions));
+        observe(answers ? { ok: true } : { ok: false, reason: "unusable response" });
+        return answers;
+      } catch (error) {
         // Every gate treats a missing decision as "do nothing", so an outage never blocks a session.
+        observe({ ok: false, reason: error instanceof Error && error.name === "TimeoutError" ? "timed out" : "could not be reached" });
         return undefined;
       }
     },
