@@ -88,10 +88,82 @@ test("tier models apply to every agent in the tier and per-agent models override
   expect(agents.get("explore")?.model).toEqual(haiku);
   expect(agents.get("oracle")?.model).toEqual({ providerID: "openai", id: "gpt-6-astra", variant: "high" });
   expect(agents.get("plan-reviewer")?.model).toEqual({ providerID: "openai", id: "gpt-6-astra", variant: "xhigh" });
-  expect(agents.get("build")?.model).toEqual({ providerID: "anthropic", id: "claude-sonnet-5-5" });
+  // The registered build alias mirrors the orchestrator, so the build override (aimed at stock build) is ignored.
+  expect(agents.get("build")?.model).toBeUndefined();
   expect(agents.get("worker")?.model).toBeUndefined();
-  expect(Object.fromEntries(assignedModels(config))).toMatchObject({ explore: haiku, build: { id: "claude-sonnet-5-5" } });
+  expect(Object.fromEntries(assignedModels(config))).toMatchObject({ explore: haiku });
+  expect(assignedModels(config).has("build")).toBe(false);
   expect(assignedModels(config).has("worker")).toBe(false);
+});
+
+test("with bundled agents off, build overrides apply to the stock agent and assignedModels agrees", () => {
+  const model = { providerID: "a", id: "b", variant: "high" };
+  const modelled = agentsConfig({ bundledAgents: false, agents: { build: { model: "a/b#high" } } }).config;
+  const first = fakeEditor({ build: { system: "stock" } });
+  applyAgents(first.editor, modelled);
+  expect(first.agents.get("build")).toMatchObject({ system: "stock", model });
+  expect(Object.fromEntries(assignedModels(modelled))).toEqual({ build: model });
+
+  const disabled = agentsConfig({ bundledAgents: false, agents: { build: { disabled: true } } }).config;
+  const second = fakeEditor({ build: { system: "stock" } });
+  applyAgents(second.editor, disabled);
+  expect(second.agents.has("build")).toBe(false);
+  expect(assignedModels(disabled).has("build")).toBe(false);
+});
+
+test("the build alias uses the orchestrator's effective model, including an orchestrator override", () => {
+  const { config } = agentsConfig({ models: { lead: "a/tier#low" }, agents: { orchestrator: { model: "a/override#high" } } });
+  const { editor, agents } = fakeEditor();
+  applyAgents(editor, config);
+  const override = { providerID: "a", id: "override", variant: "high" };
+  expect(agents.get("orchestrator")?.model).toEqual(override);
+  expect(agents.get("build")).toMatchObject({ hidden: true, name: "Orchestrator", model: override });
+  expect(assignedModels(config).get("build")).toEqual(override);
+
+  const tiered = agentsConfig({ models: { lead: "a/tier#low" } }).config;
+  const plain = fakeEditor();
+  applyAgents(plain.editor, tiered);
+  expect(plain.agents.get("build")?.model).toEqual({ providerID: "a", id: "tier", variant: "low" });
+  expect(assignedModels(tiered).get("build")).toEqual({ providerID: "a", id: "tier", variant: "low" });
+});
+
+test("the build alias is not registered when the orchestrator is disabled, and stock build overrides apply", () => {
+  const { config } = agentsConfig({ agents: { orchestrator: { disabled: true }, build: { model: "a/b#high" } } });
+  const { editor, agents } = fakeEditor({ build: { system: "stock", hidden: false } });
+  applyAgents(editor, config);
+  expect(agents.has("orchestrator")).toBe(false);
+  expect(agents.get("build")).toMatchObject({ system: "stock", hidden: false, model: { providerID: "a", id: "b", variant: "high" } });
+  expect(assignedModels(config).get("build")).toEqual({ providerID: "a", id: "b", variant: "high" });
+
+  const removed = agentsConfig({ agents: { orchestrator: { disabled: true }, build: { disabled: true } } }).config;
+  const second = fakeEditor({ build: { system: "stock" } });
+  applyAgents(second.editor, removed);
+  expect(second.agents.has("build")).toBe(false);
+  expect(assignedModels(removed).has("build")).toBe(false);
+
+  const untouched = fakeEditor();
+  applyAgents(untouched.editor, agentsConfig({ agents: { orchestrator: { disabled: true } } }).config);
+  expect(untouched.agents.has("build")).toBe(false);
+});
+
+test("build.disabled with bundled agents on still registers a hidden alias, and assignedModels agrees", () => {
+  const { config } = agentsConfig({ models: { lead: "a/tier#low" }, agents: { build: { disabled: true } } });
+  const { editor, agents } = fakeEditor({ build: { system: "stock" } });
+  applyAgents(editor, config);
+  const lead = { providerID: "a", id: "tier", variant: "low" };
+  expect(agents.get("build")).toMatchObject({ hidden: true, name: "Orchestrator", model: lead });
+  expect(agents.get("build")?.system).not.toBe("stock");
+  expect(assignedModels(config).get("build")).toEqual(lead);
+});
+
+test("the build alias drops a model left on the stock agent when the orchestrator has none", () => {
+  const { config } = agentsConfig({});
+  const { editor, agents } = fakeEditor({ build: { model: { providerID: "p", id: "stock-build", variant: "low" } } });
+  applyAgents(editor, config);
+  expect(agents.get("build")).toMatchObject({ hidden: true, name: "Orchestrator" });
+  expect(agents.get("build")?.model).toBeUndefined();
+  expect(agents.get("orchestrator")?.model).toBeUndefined();
+  expect(assignedModels(config).has("build")).toBe(false);
 });
 
 test("the security researcher uses the security tier, writes only under .foreman/security, and delegates to three agents", () => {
