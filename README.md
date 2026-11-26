@@ -111,6 +111,7 @@ Each agent belongs to a tier, and you assign a model to each tier in a Foreman c
 - `models` sets one model per tier, as `provider/model` or `provider/model#variant`.
 - `agents.<id>.model` overrides the tier for one agent. It works for any agent, including ones Foreman does not ship.
 - `agents.<id>.disabled` withholds a bundled agent, or removes any other agent.
+- OpenCode's stock `build` agent is replaced by a hidden alias of `orchestrator`, so commands and configs that name `build` still work. The alias mirrors the orchestrator, including its model, and ignores `agents.build` settings. It is not registered when `bundledAgents` is `false` or the orchestrator is disabled; `agents.build` then applies to the stock agent as usual.
 - `defaultAgent` selects the agent for new sessions. Unset, OpenCode's default stays.
 - `bundledAgents: false` skips the roster and keeps the gates and model assignment.
 
@@ -161,7 +162,7 @@ The package includes a TUI part, loaded automatically with the server part:
 
 A toast also confirms each config reload.
 
-**Variant sync.** The TUI remembers the last variant you picked for each model and applies it over an agent's configured one. When the prompt's model changes, Foreman's TUI part sets the variant back to the one configured for the agent using that model. A variant you pick afterwards stays until the model changes again. Before a session exists the TUI does not say which agent is selected, so the variant is taken from the primary agents configured with that model, and an agent with no model of its own that inherits the same model gets that variant too. Turn it off with `"tui": { "syncVariants": false }`.
+**Variant sync.** The TUI remembers the last variant you picked for each model and applies it over an agent's configured one. When the prompt's model changes, Foreman's TUI part sets the variant back to the one configured for the agent using that model. A variant you pick afterwards stays until the model changes again. Before a session exists the TUI does not say which agent is selected, so the variant is taken from the primary agents configured with that model, and an agent with no model of its own that inherits the same model gets that variant too. If those agents disagree, the variant is left alone until the first message creates the session and its agent is known, then that agent's variant is applied; a variant you pick while it waits is kept. Because the session only exists once the first message is sent, that first message can go out with the earlier variant. Turn it off with `"tui": { "syncVariants": false }`.
 
 ## Decision log
 

@@ -49,6 +49,7 @@ src/
   rpc.ts                # Contract shared with the TUI: status method, decision/plan/config events
   tui.tsx               # TUI entry point — footer, sidebar, toasts, /foreman dialog (loaded from source)
   tui/format.ts         # Pure text formatting for the TUI views
+  tui/variant-sync.ts   # State machine deciding when the TUI re-applies an agent's configured variant
   agents/               # Bundled agent roster
     types.ts            # AgentDefinition, tiers, shared permission sets
     shared.ts           # Prompt sections reused across agents
